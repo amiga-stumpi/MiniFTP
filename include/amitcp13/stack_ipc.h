@@ -1,0 +1,65 @@
+#ifndef AMITCP13_STACK_IPC_H
+#define AMITCP13_STACK_IPC_H
+
+#include <exec/types.h>
+#include <exec/ports.h>
+
+#define AMITCP13_STACK_PORT_NAME "amitcp13.stack"
+
+#define AMITCP13_IPC_VERSION 1
+
+#define AMITCP13_IPC_CMD_PING        1
+#define AMITCP13_IPC_CMD_SOCKET      2
+#define AMITCP13_IPC_CMD_CLOSE       3
+#define AMITCP13_IPC_CMD_CONNECT     4
+#define AMITCP13_IPC_CMD_SEND        5
+#define AMITCP13_IPC_CMD_RECV        6
+#define AMITCP13_IPC_CMD_TCP_STATE   7
+#define AMITCP13_IPC_CMD_CLOSE_START 8
+#define AMITCP13_IPC_CMD_TCP_DONE    9
+#define AMITCP13_IPC_CMD_SEND_TEST   10
+#define AMITCP13_IPC_CMD_RESOLVE_A   11
+#define AMITCP13_IPC_CMD_READY       12
+#define AMITCP13_IPC_CMD_SENDTO      13
+#define AMITCP13_IPC_CMD_RECVFROM    14
+
+#define AMITCP13_IPC_READY_READ   1
+#define AMITCP13_IPC_READY_WRITE  2
+#define AMITCP13_IPC_READY_EXCEPT 4
+
+#define AMITCP13_IPC_SOCKET_TCP 1
+#define AMITCP13_IPC_SOCKET_UDP 2
+#define AMITCP13_IPC_SOCKET_RAW_ICMP 3
+
+#define AMITCP13_IPC_OK          0
+#define AMITCP13_IPC_ERR        -1
+#define AMITCP13_IPC_ERR_NOSTACK -2
+#define AMITCP13_IPC_ERR_NOMEM   -3
+#define AMITCP13_IPC_ERR_BADFD   -4
+#define AMITCP13_IPC_ERR_PROTO   -5
+#define AMITCP13_IPC_ERR_AGAIN   -6
+#define AMITCP13_IPC_ERR_STATE   -7
+
+#ifndef AMITCP13_IPC_PAYLOAD_MAX
+#define AMITCP13_IPC_PAYLOAD_MAX 2048
+#endif
+
+#define AMITCP13_IPC_DATA_SIZE AMITCP13_IPC_PAYLOAD_MAX
+#define AMITCP13_IPC_TEST_SEND_MAX AMITCP13_IPC_PAYLOAD_MAX
+
+struct Amitcp13IpcRequest
+{
+    struct Message msg;
+    UWORD version;
+    UWORD command;
+    LONG result;
+
+    LONG arg0;
+    LONG arg1;
+    LONG arg2;
+    LONG arg3;
+
+    UBYTE data[AMITCP13_IPC_DATA_SIZE];
+};
+
+#endif
