@@ -37,6 +37,7 @@
 #define MAX_REMOTE_ENTRIES 128
 #define PROGRESS_STEP_BYTES 32768L
 #define UPLOAD_RETRY_LIMIT 64
+#define CONTROL_SEND_RETRY_LIMIT 64
 
 #ifndef MINI_FTP_DEBUG
 #define MINI_FTP_DEBUG 0
@@ -1145,16 +1146,33 @@ static int send_all(struct Library *base, int fd, const char *buf, int len)
     int sent_total = 0;
     int sent;
     int err;
+    int retries = 0;
     while (sent_total < len) {
+        if (!wait_for_socket(base, fd, 1))
+            return 0;
         sent = call_send(base, fd, buf + sent_total, len - sent_total, 0);
         if (sent > 0) {
             sent_total += sent;
+            retries = 0;
+            continue;
+        }
+        if (sent == 0) {
+            if (++retries > CONTROL_SEND_RETRY_LIMIT) {
+                set_status("send failed");
+                draw_status_now();
+                return 0;
+            }
             continue;
         }
         err = call_errno(base);
-        if (err == AMITCP13_EWOULDBLOCK || err == AMITCP13_EAGAIN) {
-            if (!wait_for_socket(base, fd, 1))
+        if (err == AMITCP13_EWOULDBLOCK ||
+            err == AMITCP13_EAGAIN ||
+            err == AMITCP13_EINTR) {
+            if (++retries > CONTROL_SEND_RETRY_LIMIT) {
+                set_status("send failed");
+                draw_status_now();
                 return 0;
+            }
             continue;
         }
         set_status_errno("send failed", err);
@@ -1168,6 +1186,7 @@ static int upload_retry_error(int err)
 {
     return err == AMITCP13_EWOULDBLOCK ||
            err == AMITCP13_EAGAIN ||
+           err == AMITCP13_EINTR ||
            err == AMITCP13_EIO ||
            err == AMITCP13_ENOBUFS;
 }
@@ -1318,6 +1337,8 @@ static int read_line(struct Library *base, int fd, char *line, int max_len)
     int got;
     int err;
     for (;;) {
+        if (!wait_for_socket(base, fd, 0))
+            return 0;
         got = call_recv(base, fd, &ch, 1, 0);
         if (got == 1) {
             if (ch == '\r')
@@ -1339,9 +1360,9 @@ static int read_line(struct Library *base, int fd, char *line, int max_len)
             return pos > 0;
         }
         err = call_errno(base);
-        if (err == AMITCP13_EWOULDBLOCK || err == AMITCP13_EAGAIN) {
-            if (!wait_for_socket(base, fd, 0))
-                return 0;
+        if (err == AMITCP13_EWOULDBLOCK ||
+            err == AMITCP13_EAGAIN ||
+            err == AMITCP13_EINTR) {
             continue;
         }
         set_status_errno("recv failed", err);
@@ -1367,6 +1388,9 @@ static int read_response(struct Library *base, int fd, int *out_code)
         if (!read_line(base, fd, g_line, LINE_BUF_SIZE)) {
             return 0;
         }
+        ftp_debug_puts("FTP GUI reply: ");
+        ftp_debug_puts(g_line);
+        ftp_debug_puts("\n");
         code = line_code(g_line);
         if (!code)
             continue;
@@ -1403,6 +1427,16 @@ static int ftp_command(struct Library *base, int fd, const char *cmd, const char
     int len = build_command1(cmd, arg);
     if (len <= 0)
         return 0;
+    ftp_debug_puts("FTP GUI command: ");
+    ftp_debug_puts(cmd);
+    if (arg && arg[0]) {
+        ftp_debug_puts(" ");
+        if (text_equal(cmd, "PASS"))
+            ftp_debug_puts("***");
+        else
+            ftp_debug_puts(arg);
+    }
+    ftp_debug_puts("\n");
     if (!send_all(base, fd, g_cmd, len))
         return 0;
     return read_response(base, fd, out_code);
