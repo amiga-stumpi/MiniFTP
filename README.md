@@ -23,8 +23,10 @@ APIs.
   autoconnect, and port.
 - Configurable FTP control port.
 - Persistent FTP control connection.
-- PASV `LIST`, `RETR`, `STOR`, and `DELETE` support.
+- PASV `LIST`, `RETR`, `STOR`, and remote `DELE` support.
+- Local and remote file deletion with confirmation.
 - Local and remote directory navigation with `..` entries.
+- Info dialog with author/version text.
 
 ## Requirements
 

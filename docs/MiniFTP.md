@@ -4,13 +4,13 @@
 GUI application and uses `bsdsocket.library` only; it does not call internal
 `amitcp13` stack APIs.
 
-Banner/title:
+Version identity:
 
 ```text
 MiniFTP v1.1 by Marcel Jaehne (c)2026
 ```
 
-The window title shows the version banner.
+The window title is shortened to `MiniFTP v1.1`; the full author/version text is shown in the `Info` dialog.
 
 ## Shell Usage
 
@@ -44,7 +44,8 @@ The window contains:
 - center transfer buttons:
   - `->` uploads the selected local file
   - `<-` downloads the selected remote file
-  - `Delete` deletes the selected remote file
+  - `Delete` deletes the selected file from the active local or FTP pane after confirmation
+  - `Info` opens the version/about dialog
 - a status/error line for connection failures, timeouts, and transfer progress
 
 ## Workbench Usage
@@ -96,10 +97,11 @@ used. Those APIs are intentionally avoided for AmigaOS 1.3 compatibility.
    `..` are rejected with a status-line message.
 8. Select a remote file and click `<-` to download it with `RETR` into the
    current local path.
-9. Select a remote file and click `Delete` to remove it with `DELE`; the remote
-   list refreshes after a successful delete.
+9. Select a local or remote file and click `Delete`; confirm the safety prompt.
+   Local files are removed with AmigaDOS `DeleteFile()`, remote files with FTP `DELE`.
 10. Double-click a remote directory to enter it with `CWD`.
 11. Double-click remote `..` to go up with `CDUP`.
+12. Click `Info` to show the MiniFTP version/about dialog.
 
 ## FTP Support
 
@@ -115,7 +117,8 @@ The GUI supports:
 - remote directory navigation with `CWD` / `CDUP`
 - upload with `STOR`
 - download with `RETR`
-- delete with `DELE`
+- remote delete with `DELE`
+- local file delete with `DeleteFile()`
 - `QUIT` when closing an active session
 
 PASV mode is the only supported transfer mode. Directory navigation reuses the
@@ -135,12 +138,15 @@ before reading the final `226`/`250` transfer reply.
 - Remote `LIST` parsing is intentionally basic and optimized for common UNIX
   style listings. Lines beginning with `d` are treated as directories; uncertain
   entries are treated as files.
-- Uploads, downloads, and deletes operate on files only. Directory transfers are
-  not implemented.
+- Uploads, downloads, and deletes operate on files only. Directory transfers and
+  directory deletion are not implemented.
+- Delete uses the last active file pane: click a local file to delete locally, or
+  click a remote file to delete via FTP.
 - No TLS/FTPS.
 - No rename, mkdir, or active `PORT` mode.
 - No Workbench AppWindow or drag-and-drop support on AmigaOS 1.3.
 - Menus are not implemented yet; the current UI uses buttons and double-clicks.
+- The `Info` dialog uses a plain OS1.3 Intuition window, not ASL/GadTools.
 
 ## Connection Status
 
@@ -249,14 +255,16 @@ Then:
 10. Try uploading a local directory or `..` and confirm the status line rejects it.
 11. Double-click a remote directory and confirm the remote path/list update.
 12. Double-click remote `..` and confirm the parent directory loads.
-13. Delete a selected remote file and confirm the remote list refreshes.
-14. Try an unreachable/wrong host, confirm `Connect failed: timeout` or a clear
+13. Delete a selected remote file, confirm the prompt, and confirm the remote list refreshes.
+14. Delete a selected local file, confirm the prompt, and confirm the local list refreshes.
+15. Click `Info` and verify the version/about dialog opens and closes.
+16. Try an unreachable/wrong host, confirm `Connect failed: timeout` or a clear
     error is shown, then connect to a valid server without restarting the GUI.
-15. Interrupt or provoke a failed upload, confirm the GUI returns to the event
+17. Interrupt or provoke a failed upload, confirm the GUI returns to the event
     loop and either GET still works or `reconnect required` is shown.
-16. Start from Workbench with ToolTypes, confirm fields are prefilled and
+18. Start from Workbench with ToolTypes, confirm fields are prefilled and
     `AUTOCONNECT=YES` connects when `HOST` and `USER` are present.
-17. Confirm the CLI client still works:
+19. Confirm the CLI client still works:
 
 ```text
 mini_ftp 192.168.7.1 anonymous test@example.com list

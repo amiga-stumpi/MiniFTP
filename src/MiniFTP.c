@@ -18,7 +18,9 @@
 #include "amitcp13/bsdsocket.h"
 #include "amitcp13/stack_ipc.h"
 
-#define MINI_FTP_GUI_TITLE "MiniFTP v1.1 by Marcel Jaehne (c)2026"
+#define MINI_FTP_VERSION "v1.1"
+#define MINI_FTP_GUI_TITLE "MiniFTP " MINI_FTP_VERSION
+#define MINI_FTP_FULL_ID "MiniFTP " MINI_FTP_VERSION " by Marcel Jaehne (c)2026"
 #define FTP_PORT 21
 #define TIMEOUT_SECONDS 20
 #define LINE_BUF_SIZE 512
@@ -67,6 +69,11 @@
 #define BUTTON_UPLOAD 3
 #define BUTTON_DOWNLOAD 4
 #define BUTTON_DELETE 5
+#define BUTTON_INFO 6
+
+#define ACTIVE_PANE_NONE 0
+#define ACTIVE_PANE_LOCAL 1
+#define ACTIVE_PANE_REMOTE 2
 
 #define CONTROL_H 84
 #define STATUS_H 20
@@ -107,6 +114,7 @@ static int g_local_top;
 static int g_remote_top;
 static int g_scroll_drag;
 static int g_pressed_button;
+static int g_active_pane = ACTIVE_PANE_REMOTE;
 static int g_pass_active;
 static int g_transfer_busy;
 static int g_last_local_click_index = -1;
@@ -143,6 +151,10 @@ static WORD BTN_DELETE_X = 294;
 static WORD BTN_DELETE_Y = 146;
 static WORD BTN_DELETE_W = 62;
 static WORD BTN_DELETE_H = 14;
+static WORD BTN_INFO_X = 294;
+static WORD BTN_INFO_Y = 166;
+static WORD BTN_INFO_W = 62;
+static WORD BTN_INFO_H = 14;
 static WORD LOCAL_X = 10;
 static WORD LOCAL_Y = 94;
 static WORD LOCAL_W = 270;
@@ -165,6 +177,7 @@ static int clamp_top(int top, int count);
 static int in_rect(WORD mx, WORD my, WORD x, WORD y, WORD w, WORD h);
 static void clear_rect(WORD x, WORD y, WORD w, WORD h);
 static void draw_password_field(void);
+static void show_info_dialog(void);
 
 static struct StringInfo g_host_si = { (STRPTR)g_host, (STRPTR)g_host_undo, 0, HOST_BUF_SIZE, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 static struct StringInfo g_port_si = { (STRPTR)g_port, (STRPTR)g_port_undo, 0, PORT_BUF_SIZE, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -324,6 +337,10 @@ static void update_layout(void)
     BTN_DELETE_Y = (WORD)(BTN_DOWNLOAD_Y + 28);
     BTN_DELETE_W = 62;
     BTN_DELETE_H = 14;
+    BTN_INFO_X = BTN_DELETE_X;
+    BTN_INFO_Y = (WORD)(BTN_DELETE_Y + 24);
+    BTN_INFO_W = 62;
+    BTN_INFO_H = 14;
 
     g_local_top = clamp_top(g_local_top, g_local_count);
     g_remote_top = clamp_top(g_remote_top, g_remote_count);
@@ -716,6 +733,8 @@ static int button_at(WORD mx, WORD my)
         return BUTTON_DOWNLOAD;
     if (in_rect(mx, my, BTN_DELETE_X, BTN_DELETE_Y, BTN_DELETE_W, BTN_DELETE_H))
         return BUTTON_DELETE;
+    if (in_rect(mx, my, BTN_INFO_X, BTN_INFO_Y, BTN_INFO_W, BTN_INFO_H))
+        return BUTTON_INFO;
     return BUTTON_NONE;
 }
 
@@ -736,6 +755,9 @@ static void draw_button_by_id(int button, int pressed)
         break;
     case BUTTON_DELETE:
         draw_button_state(BTN_DELETE_X, BTN_DELETE_Y, BTN_DELETE_W, BTN_DELETE_H, "Delete", pressed);
+        break;
+    case BUTTON_INFO:
+        draw_button_state(BTN_INFO_X, BTN_INFO_Y, BTN_INFO_W, BTN_INFO_H, "Info", pressed);
         break;
     default:
         break;
@@ -962,6 +984,7 @@ static void draw_ui(void)
     draw_button(BTN_UPLOAD_X, BTN_UPLOAD_Y, BTN_UPLOAD_W, BTN_UPLOAD_H, "->");
     draw_button(BTN_DOWNLOAD_X, BTN_DOWNLOAD_Y, BTN_DOWNLOAD_W, BTN_DOWNLOAD_H, "<-");
     draw_button(BTN_DELETE_X, BTN_DELETE_Y, BTN_DELETE_W, BTN_DELETE_H, "Delete");
+    draw_button(BTN_INFO_X, BTN_INFO_Y, BTN_INFO_W, BTN_INFO_H, "Info");
 
     clear_rect((WORD)(STATUS_X + 2), (WORD)(STATUS_Y + 3), (WORD)(STATUS_W - 4), 12);
     draw_box(STATUS_X, STATUS_Y, STATUS_W, 17);
@@ -2291,6 +2314,219 @@ static int ftp_upload_selected(void)
     return 1;
 }
 
+static int dialog_button_hit(WORD mx, WORD my, WORD x, WORD y, WORD w, WORD h)
+{
+    return mx >= x && mx <= x + w && my >= y && my <= y + h;
+}
+
+static void dialog_draw_button(struct Window *win, WORD x, WORD y, WORD w, WORD h, const char *label)
+{
+    if (!win)
+        return;
+    SetAPen(win->RPort, 1);
+    Move(win->RPort, x, y);
+    Draw(win->RPort, (WORD)(x + w), y);
+    Draw(win->RPort, (WORD)(x + w), (WORD)(y + h));
+    Draw(win->RPort, x, (WORD)(y + h));
+    Draw(win->RPort, x, y);
+    Move(win->RPort, (WORD)(x + 8), (WORD)(y + 12));
+    Text(win->RPort, (STRPTR)label, text_len(label));
+}
+
+static void dialog_text(struct Window *win, WORD x, WORD y, const char *text)
+{
+    if (!win || !text)
+        return;
+    SetAPen(win->RPort, 1);
+    Move(win->RPort, x, y);
+    Text(win->RPort, (STRPTR)text, text_len(text));
+}
+
+static int confirm_delete_dialog(const char *where, const char *name)
+{
+    struct NewWindow nw;
+    struct Window *win;
+    struct IntuiMessage *msg;
+    ULONG cls;
+    UWORD code;
+    WORD mx;
+    WORD my;
+    int running = 1;
+    int result = 0;
+
+    nw.LeftEdge = 40;
+    nw.TopEdge = 35;
+    nw.Width = 420;
+    nw.Height = 92;
+    nw.DetailPen = 0;
+    nw.BlockPen = 1;
+    nw.IDCMPFlags = IDCMP_CLOSEWINDOW | IDCMP_MOUSEBUTTONS | IDCMP_REFRESHWINDOW;
+    nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_ACTIVATE | WFLG_SMART_REFRESH;
+    nw.FirstGadget = 0;
+    nw.CheckMark = 0;
+    nw.Title = (STRPTR)"Confirm delete";
+    nw.Screen = 0;
+    nw.BitMap = 0;
+    nw.MinWidth = 240;
+    nw.MinHeight = 70;
+    nw.MaxWidth = 640;
+    nw.MaxHeight = 200;
+    nw.Type = WBENCHSCREEN;
+
+    win = OpenWindow(&nw);
+    if (!win) {
+        set_status_draw("Delete confirm failed");
+        return 0;
+    }
+
+    while (running) {
+        SetDrMd(win->RPort, JAM1);
+        SetAPen(win->RPort, 0);
+        RectFill(win->RPort, 0, 10, (WORD)(win->Width - 1), (WORD)(win->Height - 1));
+        SetAPen(win->RPort, 1);
+        dialog_text(win, 12, 25, "Delete selected file?");
+        dialog_text(win, 12, 40, where ? where : "");
+        dialog_text(win, 12, 55, name ? name : "");
+        dialog_draw_button(win, 250, 66, 58, 16, "OK");
+        dialog_draw_button(win, 320, 66, 70, 16, "Cancel");
+
+        Wait(1UL << win->UserPort->mp_SigBit);
+        while ((msg = (struct IntuiMessage *)GetMsg(win->UserPort))) {
+            cls = msg->Class;
+            code = msg->Code;
+            mx = msg->MouseX;
+            my = msg->MouseY;
+            ReplyMsg((struct Message *)msg);
+            if (cls == IDCMP_CLOSEWINDOW) {
+                running = 0;
+            } else if (cls == IDCMP_REFRESHWINDOW) {
+                BeginRefresh(win);
+                EndRefresh(win, TRUE);
+                break;
+            } else if (cls == IDCMP_MOUSEBUTTONS && code == SELECTUP) {
+                if (dialog_button_hit(mx, my, 250, 66, 58, 16)) {
+                    result = 1;
+                    running = 0;
+                } else if (dialog_button_hit(mx, my, 320, 66, 70, 16)) {
+                    running = 0;
+                }
+            }
+        }
+    }
+    CloseWindow(win);
+    return result;
+}
+
+static void show_info_dialog(void)
+{
+    struct NewWindow nw;
+    struct Window *win;
+    struct IntuiMessage *msg;
+    ULONG cls;
+    UWORD code;
+    WORD mx;
+    WORD my;
+    int running = 1;
+
+    nw.LeftEdge = 10;
+    nw.TopEdge = 20;
+    nw.Width = 620;
+    nw.Height = 110;
+    nw.DetailPen = 0;
+    nw.BlockPen = 1;
+    nw.IDCMPFlags = IDCMP_CLOSEWINDOW | IDCMP_MOUSEBUTTONS | IDCMP_REFRESHWINDOW;
+    nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_ACTIVATE | WFLG_SMART_REFRESH;
+    nw.FirstGadget = 0;
+    nw.CheckMark = 0;
+    nw.Title = (STRPTR)"MiniFTP Info";
+    nw.Screen = 0;
+    nw.BitMap = 0;
+    nw.MinWidth = 300;
+    nw.MinHeight = 80;
+    nw.MaxWidth = 640;
+    nw.MaxHeight = 200;
+    nw.Type = WBENCHSCREEN;
+
+    win = OpenWindow(&nw);
+    if (!win) {
+        set_status_draw("Info window failed");
+        return;
+    }
+
+    while (running) {
+        SetDrMd(win->RPort, JAM1);
+        SetAPen(win->RPort, 0);
+        RectFill(win->RPort, 0, 10, (WORD)(win->Width - 1), (WORD)(win->Height - 1));
+        SetAPen(win->RPort, 1);
+        dialog_text(win, 12, 25, "MiniFTP for Kick1.3");
+        dialog_text(win, 12, 40, "Version: " MINI_FTP_VERSION);
+        dialog_text(win, 12, 55, "by Marcel Jaehne");
+        dialog_text(win, 12, 70, "(c) 2026");
+        dialog_text(win, 12, 85, "If you want to buy me a coffe, send me a buck to: https://paypal.me/mytubefree");
+        dialog_draw_button(win, 290, 92, 58, 16, "OK");
+
+        Wait(1UL << win->UserPort->mp_SigBit);
+        while ((msg = (struct IntuiMessage *)GetMsg(win->UserPort))) {
+            cls = msg->Class;
+            code = msg->Code;
+            mx = msg->MouseX;
+            my = msg->MouseY;
+            ReplyMsg((struct Message *)msg);
+            if (cls == IDCMP_CLOSEWINDOW) {
+                running = 0;
+            } else if (cls == IDCMP_REFRESHWINDOW) {
+                BeginRefresh(win);
+                EndRefresh(win, TRUE);
+                break;
+            } else if (cls == IDCMP_MOUSEBUTTONS && code == SELECTUP) {
+                if (dialog_button_hit(mx, my, 290, 92, 58, 16))
+                    running = 0;
+            }
+        }
+    }
+    CloseWindow(win);
+    if (g_win)
+        draw_ui();
+}
+
+static int local_delete_selected(void)
+{
+    char local_file[PATH_BUF_SIZE + NAME_BUF_SIZE];
+    const char *local;
+
+    if (g_transfer_busy) {
+        set_status_draw("Busy");
+        return 0;
+    }
+    if (g_local_sel < 0 || g_local_sel >= g_local_count) {
+        set_status_draw("No local file selected");
+        return 0;
+    }
+    if (text_equal(g_local_entries[g_local_sel].name, "..")) {
+        set_status_draw("Select a file to delete");
+        return 0;
+    }
+    if (g_local_entries[g_local_sel].is_dir) {
+        set_status_draw("Cannot delete directory");
+        return 0;
+    }
+
+    local = g_local_entries[g_local_sel].name;
+    if (!confirm_delete_dialog("Local file:", local)) {
+        set_status_draw("Delete cancelled");
+        return 0;
+    }
+
+    build_local_full_path(local_file, sizeof(local_file), local);
+    if (!DeleteFile((CONST_STRPTR)local_file)) {
+        set_status_draw("Local delete failed");
+        return 0;
+    }
+    load_local_path();
+    set_status_draw("Delete complete");
+    return 1;
+}
+
 static int ftp_delete_selected(void)
 {
     int code;
@@ -2318,6 +2554,11 @@ static int ftp_delete_selected(void)
     }
 
     remote = g_remote_entries[g_remote_sel].name;
+    if (!confirm_delete_dialog("FTP file:", remote)) {
+        set_status_draw("Delete cancelled");
+        g_transfer_busy = 0;
+        return 0;
+    }
     set_status_draw("Deleting...");
 
     if (!ftp_command(g_sock_base, g_ctrl_fd, "DELE", remote, &code)) {
@@ -2347,6 +2588,13 @@ static int ftp_delete_selected(void)
     draw_status_now();
     g_transfer_busy = 0;
     return 0;
+}
+
+static int delete_selected(void)
+{
+    if (g_active_pane == ACTIVE_PANE_LOCAL)
+        return local_delete_selected();
+    return ftp_delete_selected();
 }
 
 static int ftp_remote_enter_selected(void)
@@ -2516,13 +2764,16 @@ static void handle_mouse_up(WORD mx, WORD my)
     } else if (pressed_button == BUTTON_DOWNLOAD && released_button == pressed_button) {
         ftp_download_selected();
     } else if (pressed_button == BUTTON_DELETE && released_button == pressed_button) {
-        ftp_delete_selected();
+        delete_selected();
+    } else if (pressed_button == BUTTON_INFO && released_button == pressed_button) {
+        show_info_dialog();
     } else if (pressed_button == BUTTON_NONE && in_rect(mx, my, LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H)) {
         int row = (my - LOCAL_Y - 2) / ROW_H;
         int index = g_local_top + row;
         if (!list_scrollbar_hit(mx, my, LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H) &&
             row >= 0 && row < g_visible_rows && index >= 0 && index < g_local_count) {
             int is_double = local_click_is_double(index);
+            g_active_pane = ACTIVE_PANE_LOCAL;
             g_local_sel = index;
             draw_ui();
             if (is_double)
@@ -2534,6 +2785,7 @@ static void handle_mouse_up(WORD mx, WORD my)
         if (!list_scrollbar_hit(mx, my, REMOTE_X, REMOTE_Y, REMOTE_W, REMOTE_H) &&
             row >= 0 && row < g_visible_rows && index >= 0 && index < g_remote_count) {
             int is_double = remote_click_is_double(index);
+            g_active_pane = ACTIVE_PANE_REMOTE;
             g_remote_sel = index;
             draw_ui();
             if (is_double)
