@@ -124,10 +124,11 @@ The GUI supports:
 PASV mode is the only supported transfer mode. Directory navigation reuses the
 existing control connection: `CWD` and `CDUP` do not reconnect or log in again.
 Each remote list refresh opens one temporary PASV data socket and closes it
-before reading the final `226`/`250` transfer reply. Uploads wait briefly for the
-data socket to become writable after the final file block before closing it; this
-avoids closing a nonblocking stack while the last accepted bytes are still being
-flushed.
+before reading the final `226`/`250` transfer reply. Uploads send conservative 512-byte file chunks, issue `TYPE I` immediately before
+`STOR`, wait briefly for the data socket to become writable after the final file
+block before closing it, and compare server `SIZE` with the local byte count when
+the server supports `SIZE`. This avoids closing a nonblocking stack while the
+last accepted bytes are still being flushed and catches truncated uploads.
 
 ## Limitations
 

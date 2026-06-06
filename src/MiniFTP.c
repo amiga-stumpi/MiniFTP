@@ -41,6 +41,7 @@
 #define UPLOAD_RETRY_LIMIT 64
 #define CONTROL_SEND_RETRY_LIMIT 64
 #define UPLOAD_DRAIN_POLLS 20
+#define UPLOAD_CHUNK_SIZE 512
 #define BSD_EAGAIN_COMPAT 35
 
 #ifndef MINI_FTP_DEBUG
@@ -2275,6 +2276,12 @@ static int ftp_upload_selected(void)
         g_transfer_busy = 0;
         return 0;
     }
+    if (!ftp_command(g_sock_base, g_ctrl_fd, "TYPE", "I", &code) || code < 200 || code >= 300) {
+        Close(file);
+        ftp_gui_disconnect_session("Upload failed: TYPE I");
+        g_transfer_busy = 0;
+        return 0;
+    }
     data_fd = ftp_pasv_open_data("Upload failed");
     if (data_fd < 0) {
         Close(file);
@@ -2291,7 +2298,7 @@ static int ftp_upload_selected(void)
     }
     set_status_draw("Uploading...");
     for (;;) {
-        got = Read(file, g_data_buf, sizeof(g_data_buf));
+        got = Read(file, g_data_buf, UPLOAD_CHUNK_SIZE);
         if (got > 0) {
             if (!upload_send_chunk(g_sock_base, data_fd, (const char *)g_data_buf, (int)got, &total)) {
                 close_data_socket(&data_fd);
@@ -2323,6 +2330,14 @@ static int ftp_upload_selected(void)
         ftp_gui_disconnect_session("Upload failed: reconnect required");
         g_transfer_busy = 0;
         return 0;
+    }
+    {
+        LONG remote_size = -1;
+        if (ftp_get_remote_size(remote, &remote_size) && remote_size >= 0 && remote_size != total) {
+            set_status_draw("Upload size mismatch");
+            g_transfer_busy = 0;
+            return 0;
+        }
     }
     set_status_kb("Upload complete", total);
     draw_status_now();
