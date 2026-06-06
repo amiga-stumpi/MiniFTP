@@ -40,6 +40,7 @@
 #define PROGRESS_STEP_BYTES 32768L
 #define UPLOAD_RETRY_LIMIT 64
 #define CONTROL_SEND_RETRY_LIMIT 64
+#define UPLOAD_DRAIN_POLLS 20
 #define BSD_EAGAIN_COMPAT 35
 
 #ifndef MINI_FTP_DEBUG
@@ -1340,6 +1341,27 @@ static int socket_retry_error(int err)
            err == AMITCP13_ENOBUFS;
 }
 
+static void upload_drain_socket(struct Library *base, int fd)
+{
+    int i;
+    int got;
+    int err;
+
+    for (i = 0; i < UPLOAD_DRAIN_POLLS; ++i) {
+        if (!wait_for_socket(base, fd, 1))
+            return;
+        got = call_recv(base, fd, g_data_buf, sizeof(g_data_buf), 0);
+        if (got == 0)
+            return;
+        if (got < 0) {
+            err = call_errno(base);
+            if (socket_retry_error(err))
+                continue;
+            return;
+        }
+    }
+}
+
 static int upload_send_chunk(struct Library *base, int fd, const char *buf, int len, LONG *total)
 {
     int sent_total = 0;
@@ -2295,6 +2317,7 @@ static int ftp_upload_selected(void)
         return 0;
     }
     Close(file);
+    upload_drain_socket(g_sock_base, data_fd);
     close_data_socket(&data_fd);
     if (!ftp_read_final_transfer_reply("Upload failed")) {
         ftp_gui_disconnect_session("Upload failed: reconnect required");
