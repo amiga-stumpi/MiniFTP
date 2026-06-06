@@ -61,6 +61,13 @@
 #define SCROLL_LOCAL 1
 #define SCROLL_REMOTE 2
 
+#define BUTTON_NONE 0
+#define BUTTON_CONNECT 1
+#define BUTTON_LOAD 2
+#define BUTTON_UPLOAD 3
+#define BUTTON_DOWNLOAD 4
+#define BUTTON_DELETE 5
+
 #define CONTROL_H 84
 #define STATUS_H 20
 #define MIN_LIST_ROWS 4
@@ -99,6 +106,7 @@ static int g_remote_sel = -1;
 static int g_local_top;
 static int g_remote_top;
 static int g_scroll_drag;
+static int g_pressed_button;
 static int g_pass_active;
 static int g_transfer_busy;
 static int g_last_local_click_index = -1;
@@ -154,6 +162,7 @@ static WORD STATUS_TEXT_Y = 187;
 static int g_visible_rows = 8;
 
 static int clamp_top(int top, int count);
+static int in_rect(WORD mx, WORD my, WORD x, WORD y, WORD w, WORD h);
 static void clear_rect(WORD x, WORD y, WORD w, WORD h);
 static void draw_password_field(void);
 
@@ -668,10 +677,69 @@ static void draw_box(WORD x, WORD y, WORD w, WORD h)
     Draw(g_win->RPort, x, y);
 }
 
-static void draw_button(WORD x, WORD y, WORD w, WORD h, const char *label)
+static void draw_button_state(WORD x, WORD y, WORD w, WORD h, const char *label, int pressed)
 {
+    if (!g_win)
+        return;
+    if (pressed) {
+        SetAPen(g_win->RPort, 1);
+        RectFill(g_win->RPort, (WORD)(x + 1), (WORD)(y + 1),
+                 (WORD)(x + w - 1), (WORD)(y + h - 1));
+        SetAPen(g_win->RPort, 0);
+        draw_text_xy((WORD)(x + 6), (WORD)(y + 11), label);
+        SetAPen(g_win->RPort, 1);
+        draw_box(x, y, w, h);
+        return;
+    }
+    SetAPen(g_win->RPort, 0);
+    RectFill(g_win->RPort, (WORD)(x + 1), (WORD)(y + 1),
+             (WORD)(x + w - 1), (WORD)(y + h - 1));
+    SetAPen(g_win->RPort, 1);
     draw_box(x, y, w, h);
     draw_text_xy((WORD)(x + 6), (WORD)(y + 11), label);
+}
+
+static void draw_button(WORD x, WORD y, WORD w, WORD h, const char *label)
+{
+    draw_button_state(x, y, w, h, label, 0);
+}
+
+static int button_at(WORD mx, WORD my)
+{
+    if (in_rect(mx, my, BTN_CONNECT_X, BTN_CONNECT_Y, BTN_CONNECT_W, BTN_CONNECT_H))
+        return BUTTON_CONNECT;
+    if (in_rect(mx, my, BTN_LOAD_X, BTN_LOAD_Y, BTN_LOAD_W, BTN_LOAD_H))
+        return BUTTON_LOAD;
+    if (in_rect(mx, my, BTN_UPLOAD_X, BTN_UPLOAD_Y, BTN_UPLOAD_W, BTN_UPLOAD_H))
+        return BUTTON_UPLOAD;
+    if (in_rect(mx, my, BTN_DOWNLOAD_X, BTN_DOWNLOAD_Y, BTN_DOWNLOAD_W, BTN_DOWNLOAD_H))
+        return BUTTON_DOWNLOAD;
+    if (in_rect(mx, my, BTN_DELETE_X, BTN_DELETE_Y, BTN_DELETE_W, BTN_DELETE_H))
+        return BUTTON_DELETE;
+    return BUTTON_NONE;
+}
+
+static void draw_button_by_id(int button, int pressed)
+{
+    switch (button) {
+    case BUTTON_CONNECT:
+        draw_button_state(BTN_CONNECT_X, BTN_CONNECT_Y, BTN_CONNECT_W, BTN_CONNECT_H, "Connect", pressed);
+        break;
+    case BUTTON_LOAD:
+        draw_button_state(BTN_LOAD_X, BTN_LOAD_Y, BTN_LOAD_W, BTN_LOAD_H, "Load", pressed);
+        break;
+    case BUTTON_UPLOAD:
+        draw_button_state(BTN_UPLOAD_X, BTN_UPLOAD_Y, BTN_UPLOAD_W, BTN_UPLOAD_H, "->", pressed);
+        break;
+    case BUTTON_DOWNLOAD:
+        draw_button_state(BTN_DOWNLOAD_X, BTN_DOWNLOAD_Y, BTN_DOWNLOAD_W, BTN_DOWNLOAD_H, "<-", pressed);
+        break;
+    case BUTTON_DELETE:
+        draw_button_state(BTN_DELETE_X, BTN_DELETE_Y, BTN_DELETE_W, BTN_DELETE_H, "Delete", pressed);
+        break;
+    default:
+        break;
+    }
 }
 
 static void draw_field_frame(const struct Gadget *gad)
@@ -2397,6 +2465,10 @@ static int local_enter_selected(void)
 
 static void handle_mouse_down(WORD mx, WORD my)
 {
+    g_pressed_button = button_at(mx, my);
+    if (g_pressed_button != BUTTON_NONE)
+        draw_button_by_id(g_pressed_button, 1);
+
     if (in_rect(mx, my, PASS_FIELD_X, PASS_FIELD_Y, PASS_FIELD_W, PASS_FIELD_H)) {
         g_pass_active = 1;
         draw_password_field();
@@ -2427,17 +2499,25 @@ static void handle_mouse_move(WORD mx, WORD my)
 
 static void handle_mouse_up(WORD mx, WORD my)
 {
-    if (in_rect(mx, my, BTN_CONNECT_X, BTN_CONNECT_Y, BTN_CONNECT_W, BTN_CONNECT_H)) {
+    int released_button = button_at(mx, my);
+    int pressed_button = g_pressed_button;
+
+    if (pressed_button != BUTTON_NONE) {
+        draw_button_by_id(pressed_button, 0);
+        g_pressed_button = BUTTON_NONE;
+    }
+
+    if (pressed_button == BUTTON_CONNECT && released_button == pressed_button) {
         ftp_connect_login();
-    } else if (in_rect(mx, my, BTN_LOAD_X, BTN_LOAD_Y, BTN_LOAD_W, BTN_LOAD_H)) {
+    } else if (pressed_button == BUTTON_LOAD && released_button == pressed_button) {
         load_local_path();
-    } else if (in_rect(mx, my, BTN_UPLOAD_X, BTN_UPLOAD_Y, BTN_UPLOAD_W, BTN_UPLOAD_H)) {
+    } else if (pressed_button == BUTTON_UPLOAD && released_button == pressed_button) {
         ftp_upload_selected();
-    } else if (in_rect(mx, my, BTN_DOWNLOAD_X, BTN_DOWNLOAD_Y, BTN_DOWNLOAD_W, BTN_DOWNLOAD_H)) {
+    } else if (pressed_button == BUTTON_DOWNLOAD && released_button == pressed_button) {
         ftp_download_selected();
-    } else if (in_rect(mx, my, BTN_DELETE_X, BTN_DELETE_Y, BTN_DELETE_W, BTN_DELETE_H)) {
+    } else if (pressed_button == BUTTON_DELETE && released_button == pressed_button) {
         ftp_delete_selected();
-    } else if (in_rect(mx, my, LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H)) {
+    } else if (pressed_button == BUTTON_NONE && in_rect(mx, my, LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H)) {
         int row = (my - LOCAL_Y - 2) / ROW_H;
         int index = g_local_top + row;
         if (!list_scrollbar_hit(mx, my, LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H) &&
@@ -2448,7 +2528,7 @@ static void handle_mouse_up(WORD mx, WORD my)
             if (is_double)
                 local_enter_selected();
         }
-    } else if (in_rect(mx, my, REMOTE_X, REMOTE_Y, REMOTE_W, REMOTE_H)) {
+    } else if (pressed_button == BUTTON_NONE && in_rect(mx, my, REMOTE_X, REMOTE_Y, REMOTE_W, REMOTE_H)) {
         int row = (my - REMOTE_Y - 2) / ROW_H;
         int index = g_remote_top + row;
         if (!list_scrollbar_hit(mx, my, REMOTE_X, REMOTE_Y, REMOTE_W, REMOTE_H) &&
@@ -2620,9 +2700,11 @@ int main(int argc, char **argv)
             if (cls == IDCMP_CLOSEWINDOW) {
                 running = 0;
             } else if (cls == IDCMP_NEWSIZE) {
+                g_pressed_button = BUTTON_NONE;
                 update_layout();
                 draw_ui();
             } else if (cls == IDCMP_REFRESHWINDOW) {
+                g_pressed_button = BUTTON_NONE;
                 BeginRefresh(g_win);
                 draw_ui();
                 EndRefresh(g_win, TRUE);
