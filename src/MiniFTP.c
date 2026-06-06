@@ -133,7 +133,7 @@ static WORD BTN_DOWNLOAD_W = 38;
 static WORD BTN_DOWNLOAD_H = 18;
 static WORD BTN_DELETE_X = 294;
 static WORD BTN_DELETE_Y = 146;
-static WORD BTN_DELETE_W = 50;
+static WORD BTN_DELETE_W = 62;
 static WORD BTN_DELETE_H = 14;
 static WORD LOCAL_X = 10;
 static WORD LOCAL_Y = 94;
@@ -228,7 +228,7 @@ static void update_layout(void)
     WORD win_w = g_win ? g_win->Width : g_new_window.Width;
     WORD win_h = g_win ? g_win->Height : g_new_window.Height;
     WORD list_top = CONTROL_H;
-    WORD mid_w = 58;
+    WORD mid_w = 70;
     WORD gap = 10;
     WORD usable_w;
     WORD pane_w;
@@ -313,7 +313,7 @@ static void update_layout(void)
     BTN_DOWNLOAD_H = 18;
     BTN_DELETE_X = (WORD)(BTN_UPLOAD_X - 6);
     BTN_DELETE_Y = (WORD)(BTN_DOWNLOAD_Y + 28);
-    BTN_DELETE_W = 50;
+    BTN_DELETE_W = 62;
     BTN_DELETE_H = 14;
 
     g_local_top = clamp_top(g_local_top, g_local_count);
