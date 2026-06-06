@@ -38,6 +38,7 @@
 #define PROGRESS_STEP_BYTES 32768L
 #define UPLOAD_RETRY_LIMIT 64
 #define CONTROL_SEND_RETRY_LIMIT 64
+#define BSD_EAGAIN_COMPAT 35
 
 #ifndef MINI_FTP_DEBUG
 #define MINI_FTP_DEBUG 0
@@ -1193,6 +1194,13 @@ static int wait_for_socket(struct Library *base, int fd, int want_write)
     return 0;
 }
 
+static int socket_would_block_error(int err)
+{
+    return err == AMITCP13_EWOULDBLOCK ||
+           err == AMITCP13_EAGAIN ||
+           err == BSD_EAGAIN_COMPAT;
+}
+
 static int send_all(struct Library *base, int fd, const char *buf, int len)
 {
     int sent_total = 0;
@@ -1217,8 +1225,7 @@ static int send_all(struct Library *base, int fd, const char *buf, int len)
             continue;
         }
         err = call_errno(base);
-        if (err == AMITCP13_EWOULDBLOCK ||
-            err == AMITCP13_EAGAIN ||
+        if (socket_would_block_error(err) ||
             err == AMITCP13_EINTR) {
             if (++retries > CONTROL_SEND_RETRY_LIMIT) {
                 set_status("send failed");
@@ -1236,8 +1243,7 @@ static int send_all(struct Library *base, int fd, const char *buf, int len)
 
 static int socket_retry_error(int err)
 {
-    return err == AMITCP13_EWOULDBLOCK ||
-           err == AMITCP13_EAGAIN ||
+    return socket_would_block_error(err) ||
            err == AMITCP13_EINTR ||
            err == AMITCP13_EIO ||
            err == AMITCP13_ENOBUFS;
@@ -1412,8 +1418,7 @@ static int read_line(struct Library *base, int fd, char *line, int max_len)
             return pos > 0;
         }
         err = call_errno(base);
-        if (err == AMITCP13_EWOULDBLOCK ||
-            err == AMITCP13_EAGAIN ||
+        if (socket_would_block_error(err) ||
             err == AMITCP13_EINTR) {
             continue;
         }
