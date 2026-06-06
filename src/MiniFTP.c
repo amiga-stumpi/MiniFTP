@@ -696,6 +696,58 @@ static int text_equal(const char *a, const char *b)
     return *a == 0 && *b == 0;
 }
 
+static int text_compare_ci(const char *a, const char *b)
+{
+    char ca;
+    char cb;
+
+    if (!a)
+        a = "";
+    if (!b)
+        b = "";
+    while (*a && *b) {
+        ca = upper_ascii(*a);
+        cb = upper_ascii(*b);
+        if (ca != cb)
+            return (int)((UBYTE)ca) - (int)((UBYTE)cb);
+        ++a;
+        ++b;
+    }
+    return (int)((UBYTE)upper_ascii(*a)) - (int)((UBYTE)upper_ascii(*b));
+}
+
+static int ftp_entry_before(const struct FtpEntry *a, const struct FtpEntry *b)
+{
+    int cmp;
+
+    if (a->is_dir != b->is_dir)
+        return a->is_dir != 0;
+    cmp = text_compare_ci(a->name, b->name);
+    if (cmp != 0)
+        return cmp < 0;
+    return 0;
+}
+
+static void sort_entries(struct FtpEntry *entries, int count)
+{
+    int start = 0;
+    int i;
+
+    if (!entries || count <= 1)
+        return;
+    if (text_equal(entries[0].name, ".."))
+        start = 1;
+    for (i = start + 1; i < count; ++i) {
+        struct FtpEntry item = entries[i];
+        int j = i;
+        while (j > start && ftp_entry_before(&item, &entries[j - 1])) {
+            entries[j] = entries[j - 1];
+            --j;
+        }
+        entries[j] = item;
+    }
+}
+
 static void draw_password_field(void)
 {
     int i;
@@ -1781,6 +1833,7 @@ static int ftp_list_remote(void)
                     ftp_gui_disconnect_session("LIST failed: reconnect required");
                     return 0;
                 }
+                sort_entries(g_remote_entries, g_remote_count);
                 ftp_debug_puts("FTP GUI LIST end\n");
                 set_status("Remote list loaded");
                 draw_ui();
@@ -1832,6 +1885,7 @@ static void load_local_path(void)
     }
     FreeMem(fib, sizeof(*fib));
     UnLock(lock);
+    sort_entries(g_local_entries, g_local_count);
     set_status("Local directory loaded");
     draw_ui();
 }
