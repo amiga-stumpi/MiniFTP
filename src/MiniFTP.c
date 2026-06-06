@@ -41,7 +41,8 @@
 #define UPLOAD_RETRY_LIMIT 64
 #define CONTROL_SEND_RETRY_LIMIT 64
 #define UPLOAD_DRAIN_POLLS 20
-#define UPLOAD_CHUNK_SIZE 512
+#define UPLOAD_CHUNK_SIZE 128
+#define VERIFY_CHUNK_SIZE 512
 #define BSD_EAGAIN_COMPAT 35
 
 #ifndef MINI_FTP_DEBUG
@@ -95,6 +96,7 @@ static int g_connected;
 static char g_line[LINE_BUF_SIZE];
 static char g_cmd[CMD_BUF_SIZE];
 static UBYTE g_data_buf[DATA_BUF_SIZE];
+static UBYTE g_verify_buf[VERIFY_CHUNK_SIZE];
 static char g_host[HOST_BUF_SIZE] = "";
 static char g_port[PORT_BUF_SIZE] = "";
 static char g_user[USER_BUF_SIZE] = "anonymous";
@@ -2232,6 +2234,88 @@ static int ftp_download_selected(void)
     }
 }
 
+static int ftp_verify_uploaded_file(const char *remote, const char *local_file, LONG expected_size)
+{
+    int data_fd = -1;
+    int code;
+    int got;
+    int err;
+    BPTR file;
+    LONG local_got;
+    LONG total = 0;
+    int i;
+
+    if (!remote || !local_file)
+        return 0;
+    file = Open((CONST_STRPTR)local_file, MODE_OLDFILE);
+    if (!file) {
+        set_status_draw("Verify local open failed");
+        return 0;
+    }
+    data_fd = ftp_pasv_open_data("Verify failed");
+    if (data_fd < 0) {
+        Close(file);
+        return 0;
+    }
+    if (!ftp_command(g_sock_base, g_ctrl_fd, "RETR", remote, &code) || (code != 125 && code != 150)) {
+        close_data_socket(&data_fd);
+        Close(file);
+        set_status_draw("Verify RETR failed");
+        return 0;
+    }
+    for (;;) {
+        if (!wait_for_socket(g_sock_base, data_fd, 0)) {
+            close_data_socket(&data_fd);
+            Close(file);
+            ftp_gui_disconnect_session("Verify failed: reconnect required");
+            return 0;
+        }
+        for (;;) {
+            got = call_recv(g_sock_base, data_fd, g_data_buf, VERIFY_CHUNK_SIZE, 0);
+            if (got > 0) {
+                local_got = Read(file, g_verify_buf, got);
+                if (local_got != got) {
+                    close_data_socket(&data_fd);
+                    Close(file);
+                    ftp_gui_disconnect_session("Upload verify size mismatch");
+                    return 0;
+                }
+                for (i = 0; i < got; ++i) {
+                    if (g_data_buf[i] != g_verify_buf[i]) {
+                        close_data_socket(&data_fd);
+                        Close(file);
+                        ftp_gui_disconnect_session("Upload verify mismatch");
+                        return 0;
+                    }
+                }
+                total += got;
+                continue;
+            }
+            if (got == 0) {
+                close_data_socket(&data_fd);
+                Close(file);
+                if (!ftp_read_final_transfer_reply("Verify failed")) {
+                    ftp_gui_disconnect_session("Verify failed: reconnect required");
+                    return 0;
+                }
+                if (expected_size >= 0 && total != expected_size) {
+                    ftp_gui_disconnect_session("Upload verify size mismatch");
+                    return 0;
+                }
+                set_status_draw("Upload verify OK");
+                return 1;
+            }
+            err = call_errno(g_sock_base);
+            if (socket_retry_error(err))
+                break;
+            close_data_socket(&data_fd);
+            Close(file);
+            ftp_gui_disconnect_session("Verify failed: reconnect required");
+            return 0;
+        }
+    }
+}
+
 static int ftp_upload_selected(void)
 {
     int data_fd = -1;
@@ -2338,6 +2422,10 @@ static int ftp_upload_selected(void)
             g_transfer_busy = 0;
             return 0;
         }
+    }
+    if (!ftp_verify_uploaded_file(remote, local_file, total)) {
+        g_transfer_busy = 0;
+        return 0;
     }
     set_status_kb("Upload complete", total);
     draw_status_now();
