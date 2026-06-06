@@ -7,7 +7,7 @@ GUI application and uses `bsdsocket.library` only; it does not call internal
 Banner/title:
 
 ```text
-MiniFTP v1.0 by Marcel Jaehne (c)2026
+MiniFTP v1.1 by Marcel Jaehne (c)2026
 ```
 
 The window title shows the version banner.

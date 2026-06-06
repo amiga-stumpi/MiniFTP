@@ -5,7 +5,7 @@ MiniFTP is a classic AmigaOS 1.3 Intuition FTP client.
 Version:
 
 ```text
-MiniFTP v1.0 by Marcel Jaehne (c)2026
+MiniFTP v1.1 by Marcel Jaehne (c)2026
 ```
 
 It was split out of TheWire13 and remains designed for Kickstart/Workbench 1.3,

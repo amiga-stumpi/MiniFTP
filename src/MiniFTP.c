@@ -18,7 +18,7 @@
 #include "amitcp13/bsdsocket.h"
 #include "amitcp13/stack_ipc.h"
 
-#define MINI_FTP_GUI_TITLE "MiniFTP v1.0 by Marcel Jaehne (c)2026"
+#define MINI_FTP_GUI_TITLE "MiniFTP v1.1 by Marcel Jaehne (c)2026"
 #define FTP_PORT 21
 #define TIMEOUT_SECONDS 20
 #define LINE_BUF_SIZE 512
