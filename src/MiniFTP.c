@@ -1234,7 +1234,7 @@ static int send_all(struct Library *base, int fd, const char *buf, int len)
     return 1;
 }
 
-static int upload_retry_error(int err)
+static int socket_retry_error(int err)
 {
     return err == AMITCP13_EWOULDBLOCK ||
            err == AMITCP13_EAGAIN ||
@@ -1278,7 +1278,7 @@ static int upload_send_chunk(struct Library *base, int fd, const char *buf, int 
             continue;
         }
         err = call_errno(base);
-        if (upload_retry_error(err)) {
+        if (socket_retry_error(err)) {
             if (++retries > UPLOAD_RETRY_LIMIT) {
                 set_status("send failed");
                 draw_status_now();
@@ -1840,7 +1840,7 @@ static int ftp_list_remote(void)
                 return 1;
             }
             err = call_errno(g_sock_base);
-            if (err == AMITCP13_EWOULDBLOCK || err == AMITCP13_EAGAIN)
+            if (socket_retry_error(err))
                 break;
             close_data_socket(&data_fd);
             set_status_errno("remote LIST recv failed", err);
@@ -2099,11 +2099,14 @@ static int ftp_download_selected(void)
                 return 1;
             }
             err = call_errno(g_sock_base);
-            if (err == AMITCP13_EWOULDBLOCK || err == AMITCP13_EAGAIN)
+            if (socket_retry_error(err))
                 break;
             close_data_socket(&data_fd);
             Close(file);
-            ftp_gui_disconnect_session("Download failed: reconnect required");
+            ftp_gui_disconnect_session(0);
+            set_status_errno("Download recv failed", err);
+            if (g_win)
+                draw_ui();
             g_transfer_busy = 0;
             return 0;
         }
