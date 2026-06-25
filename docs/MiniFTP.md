@@ -7,10 +7,10 @@ GUI application and uses `bsdsocket.library` only; it does not call internal
 Version identity:
 
 ```text
-MiniFTP v1.1 by Marcel Jaehne (c)2026
+MiniFTP v1.2 by Marcel Jaehne (c)2026
 ```
 
-The window title is shortened to `MiniFTP v1.1`; the full author/version text is shown in the `Info` dialog.
+The window title is shortened to `MiniFTP v1.2`; the full author/version text is shown in the `Info` dialog.
 
 ## Shell Usage
 
@@ -42,10 +42,13 @@ The window contains:
 - local and remote directories are marked with `[DIR]`
 - a `..` parent entry is always shown at the top of both file panes
 - center transfer buttons:
-  - `->` uploads the selected local file
-  - `<-` downloads the selected remote file
-  - `Delete` deletes the selected file from the active local or FTP pane after confirmation
-  - `Info` opens the version/about dialog
+  - buttons are backed by Intuition boolean gadgets
+  - click files or directories to mark/unmark them for multi-entry operations
+  - `->` uploads the selected local file/directory or all marked local entries recursively
+  - `<-` downloads the selected remote file/directory or all marked remote entries recursively
+  - `DIR +` opens a small input window and creates a remote directory with `MKD` if it does not already exist
+  - `Delete` deletes the selected entries from the active local or FTP pane recursively after one confirmation
+  - `Projekt -> Info` opens the version/about dialog
 - a status/error line for connection failures, timeouts, and transfer progress
 
 ## Workbench Usage
@@ -93,15 +96,15 @@ used. Those APIs are intentionally avoided for AmigaOS 1.3 compatibility.
    PASV `LIST`.
 5. Double-click a local directory in the left pane to enter it.
 6. Double-click local `..` to move one AmigaDOS directory level up.
-7. Select a local file and click `->` to upload it with `STOR`. Directories and
-   `..` are rejected with a status-line message.
-8. Select a remote file and click `<-` to download it with `RETR` into the
-   current local path.
-9. Select a local or remote file and click `Delete`; confirm the safety prompt.
-   Local files are removed with AmigaDOS `DeleteFile()`, remote files with FTP `DELE`.
+7. Select a local file or directory and click `->` to upload it. Directories are
+   created remotely and processed recursively; `..` is protected.
+8. Select a remote file or directory and click `<-` to download it into the
+   current local path. Remote directories are created locally and processed recursively.
+9. Select local or remote entries and click `Delete`; confirm the single safety prompt.
+   Local trees are removed with AmigaDOS `DeleteFile()`, remote trees with `DELE`/`RMD`.
 10. Double-click a remote directory to enter it with `CWD`.
 11. Double-click remote `..` to go up with `CDUP`.
-12. Click `Info` to show the MiniFTP version/about dialog.
+12. Use `Projekt -> Info` to show the MiniFTP version/about dialog.
 
 ## FTP Support
 
@@ -115,10 +118,11 @@ The GUI supports:
 - remote `LIST`
 - local directory navigation in the left pane using plain AmigaDOS paths
 - remote directory navigation with `CWD` / `CDUP`
-- upload with `STOR`
-- download with `RETR`
-- remote delete with `DELE`
-- local file delete with `DeleteFile()`
+- upload with `STOR`, including recursive directory upload via `MKD`/`CWD`
+- explicit remote directory creation with `MKD` through the `DIR +` button
+- download with `RETR`, including recursive directory download
+- remote delete with `DELE` for files and `RMD` for emptied directories
+- local recursive delete with `DeleteFile()`
 - `QUIT` when closing an active session
 
 PASV mode is the only supported transfer mode. Directory navigation reuses the
@@ -144,14 +148,14 @@ corrupted uploads.
 - Remote `LIST` parsing is intentionally basic and optimized for common UNIX
   style listings. Lines beginning with `d` are treated as directories; uncertain
   entries are treated as files.
-- Uploads, downloads, and deletes operate on files only. Directory transfers and
-  directory deletion are not implemented.
-- Delete uses the last active file pane: click a local file to delete locally, or
-  click a remote file to delete via FTP.
+- Recursive upload, download, and delete are supported for selected files and directories.
+  The implementation keeps operations synchronous, so very large directory trees can pause the UI.
+- Delete uses the last active file pane: click a local entry to delete locally, or
+  click a remote entry to delete via FTP. The confirmation appears once at the start.
 - No TLS/FTPS.
 - No rename, mkdir, or active `PORT` mode.
 - No Workbench AppWindow or drag-and-drop support on AmigaOS 1.3.
-- Menus are not implemented yet; the current UI uses buttons and double-clicks.
+- A classic menu bar provides `Projekt -> Info`; the main actions use real Intuition buttons and double-clicks.
 - The `Info` dialog uses a plain OS1.3 Intuition window, not ASL/GadTools.
 
 ## Connection Status
@@ -251,19 +255,19 @@ Then:
 1. Connect to a local FTP server.
 2. Load `RAM:` or another local directory.
 3. Confirm remote `LIST` fills the right pane.
-4. Upload a selected local file.
-5. Download a selected remote file.
+4. Upload one or more selected local files.
+5. Download one or more selected remote files.
 6. Scroll both file panes when more than eight entries are present.
 7. Confirm local and remote directories display as `[DIR] name`.
 8. Double-click a local directory and confirm the local path/list update.
 9. Double-click local `..` and confirm the parent directory loads; at volume root
    the status line should show `Already at volume root`.
-10. Try uploading a local directory or `..` and confirm the status line rejects it.
+10. Select a local directory and confirm recursive upload creates the remote directory tree.
 11. Double-click a remote directory and confirm the remote path/list update.
 12. Double-click remote `..` and confirm the parent directory loads.
-13. Delete a selected remote file, confirm the prompt, and confirm the remote list refreshes.
+13. Select multiple local or remote entries, delete them, confirm one prompt appears, and confirm the list refreshes.
 14. Delete a selected local file, confirm the prompt, and confirm the local list refreshes.
-15. Click `Info` and verify the version/about dialog opens and closes.
+15. Use `Projekt -> Info` and verify the version/about dialog opens and closes.
 16. Try an unreachable/wrong host, confirm `Connect failed: timeout` or a clear
     error is shown, then connect to a valid server without restarting the GUI.
 17. Interrupt or provoke a failed upload, confirm the GUI returns to the event

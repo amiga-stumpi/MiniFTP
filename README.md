@@ -5,7 +5,7 @@ MiniFTP is a classic AmigaOS 1.3 Intuition FTP client.
 Version:
 
 ```text
-MiniFTP v1.1 by Marcel Jaehne (c)2026
+MiniFTP v1.2 by Marcel Jaehne (c)2026
 ```
 
 It was split out of TheWire13 and remains designed for Kickstart/Workbench 1.3,
@@ -24,7 +24,10 @@ APIs.
 - Configurable FTP control port.
 - Persistent FTP control connection.
 - PASV `LIST`, `RETR`, `STOR`, and remote `DELE` support.
-- Local and remote file deletion with confirmation.
+- Real Intuition button gadgets for the main actions.
+- Multiple files and directories can be marked for sequential recursive upload/download.
+- Local and remote files/directories can be deleted recursively after one confirmation.
+- Remote directories can be created from the `DIR +` button via FTP `MKD`.
 - Local and remote directory navigation with `..` entries.
 - Info dialog with author/version text.
 
