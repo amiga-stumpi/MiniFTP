@@ -14,11 +14,12 @@
 #include <proto/intuition.h>
 #include <proto/graphics.h>
 #include <proto/icon.h>
+#include <string.h>
 
 #include "amitcp13/bsdsocket.h"
 #include "amitcp13/stack_ipc.h"
 
-#define MINI_FTP_VERSION "v1.2"
+#define MINI_FTP_VERSION "v1.3"
 #define MINI_FTP_GUI_TITLE "MiniFTP " MINI_FTP_VERSION
 #define MINI_FTP_FULL_ID "MiniFTP " MINI_FTP_VERSION " by Marcel Jaehne (c)2026"
 #define FTP_PORT 21
@@ -37,6 +38,9 @@
 #define NAME_BUF_SIZE 64
 #define MAX_LOCAL_ENTRIES 128
 #define MAX_REMOTE_ENTRIES 128
+#define MAX_ADDRESS_ENTRIES 32
+#define ADDRESS_NAME_SIZE 40
+#define ADDRESS_BOOK_FILE "MiniFTP.addressbook"
 #define PROGRESS_STEP_BYTES 32768L
 #define UPLOAD_RETRY_LIMIT 64
 #define CONTROL_SEND_RETRY_LIMIT 64
@@ -64,6 +68,7 @@
 #define GID_BTN_DOWNLOAD 23
 #define GID_BTN_DELETE 24
 #define GID_BTN_DIRPLUS 25
+#define GID_BTN_SAVE 26
 
 #define ROW_H 9
 #define SCROLL_W 10
@@ -79,6 +84,7 @@
 #define BUTTON_DOWNLOAD 4
 #define BUTTON_DELETE 5
 #define BUTTON_DIRPLUS 6
+#define BUTTON_SAVE 7
 
 #define MENU_PROJECT 0
 #define ITEM_INFO 0
@@ -95,6 +101,15 @@ struct FtpEntry {
     char name[NAME_BUF_SIZE];
     UBYTE is_dir;
     UBYTE selected;
+};
+
+struct AddressEntry {
+    char name[ADDRESS_NAME_SIZE];
+    char host[HOST_BUF_SIZE];
+    char port[PORT_BUF_SIZE];
+    char user[USER_BUF_SIZE];
+    char pass[PASS_BUF_SIZE];
+    char remote_path[PATH_BUF_SIZE];
 };
 
 static struct Window *g_win;
@@ -149,6 +164,10 @@ static WORD BTN_CONNECT_X = 235;
 static WORD BTN_CONNECT_Y = 48;
 static WORD BTN_CONNECT_W = 76;
 static WORD BTN_CONNECT_H = 14;
+static WORD BTN_SAVE_X = 319;
+static WORD BTN_SAVE_Y = 48;
+static WORD BTN_SAVE_W = 48;
+static WORD BTN_SAVE_H = 14;
 static WORD BTN_LOAD_X = 520;
 static WORD BTN_LOAD_Y = 16;
 static WORD BTN_LOAD_W = 42;
@@ -186,12 +205,15 @@ static WORD STATUS_Y = 173;
 static WORD STATUS_W = 622;
 static WORD STATUS_TEXT_Y = 187;
 static int g_visible_rows = 8;
+static struct AddressEntry g_addresses[MAX_ADDRESS_ENTRIES];
+static int g_address_count;
 
 static int clamp_top(int top, int count);
 static int in_rect(WORD mx, WORD my, WORD x, WORD y, WORD w, WORD h);
 static void clear_rect(WORD x, WORD y, WORD w, WORD h);
 static void draw_password_field(void);
 static void show_info_dialog(void);
+static void show_address_book_dialog(void);
 static void ftp_make_directory_action(void);
 
 static struct StringInfo g_host_si = { (STRPTR)g_host, (STRPTR)g_host_undo, 0, HOST_BUF_SIZE, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -220,6 +242,10 @@ static struct Gadget g_connect_gad = {
     0, 235, 48, 76, 14, GFLG_GADGHCOMP, GACT_RELVERIFY,
     GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_CONNECT, 0
 };
+static struct Gadget g_save_gad = {
+    0, 319, 48, 48, 14, GFLG_GADGHCOMP, GACT_RELVERIFY,
+    GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_SAVE, 0
+};
 static struct Gadget g_load_gad = {
     0, 520, 16, 42, 14, GFLG_GADGHCOMP, GACT_RELVERIFY,
     GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_LOAD, 0
@@ -242,7 +268,10 @@ static struct Gadget g_dirplus_gad = {
 };
 static struct IntuiText g_menu_info_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Info", 0 };
 static struct MenuItem g_menu_info = { 0, 0, 0, 60, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_info_text, 0, 0, 0, 0 };
-static struct Menu g_menu_project = { 0, 0, 0, 58, 10, MENUENABLED, (UBYTE *)"Projekt", &g_menu_info, 0, 0, 0, 0 };
+static struct IntuiText g_menu_address_open_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Open", 0 };
+static struct MenuItem g_menu_address_open = { 0, 0, 0, 48, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_address_open_text, 0, 0, 0, 0 };
+static struct Menu g_menu_address = { 0, 70, 0, 98, 10, MENUENABLED, (UBYTE *)"Address Book", &g_menu_address_open, 0, 0, 0, 0 };
+static struct Menu g_menu_project = { &g_menu_address, 0, 0, 62, 10, MENUENABLED, (UBYTE *)"Project", &g_menu_info, 0, 0, 0, 0 };
 
 static struct NewWindow g_new_window = {
     0, 0, 639, 200,
@@ -327,6 +356,10 @@ static void update_layout(void)
     BTN_CONNECT_Y = 48;
     BTN_CONNECT_W = 76;
     BTN_CONNECT_H = 14;
+    BTN_SAVE_X = (WORD)(BTN_CONNECT_X + BTN_CONNECT_W + 8);
+    BTN_SAVE_Y = BTN_CONNECT_Y;
+    BTN_SAVE_W = 48;
+    BTN_SAVE_H = BTN_CONNECT_H;
 
     load_x = (WORD)(win_w - 58);
     if (load_x < 410)
@@ -388,6 +421,10 @@ static void update_layout(void)
     g_connect_gad.TopEdge = BTN_CONNECT_Y;
     g_connect_gad.Width = BTN_CONNECT_W;
     g_connect_gad.Height = BTN_CONNECT_H;
+    g_save_gad.LeftEdge = BTN_SAVE_X;
+    g_save_gad.TopEdge = BTN_SAVE_Y;
+    g_save_gad.Width = BTN_SAVE_W;
+    g_save_gad.Height = BTN_SAVE_H;
     g_load_gad.LeftEdge = BTN_LOAD_X;
     g_load_gad.TopEdge = BTN_LOAD_Y;
     g_load_gad.Width = BTN_LOAD_W;
@@ -532,6 +569,7 @@ static int attach_string_gadgets(void)
     AddGadget(g_win, &g_user_gad, (ULONG)-1);
     AddGadget(g_win, &g_path_gad, (ULONG)-1);
     AddGadget(g_win, &g_connect_gad, (ULONG)-1);
+    AddGadget(g_win, &g_save_gad, (ULONG)-1);
     AddGadget(g_win, &g_load_gad, (ULONG)-1);
     AddGadget(g_win, &g_upload_gad, (ULONG)-1);
     AddGadget(g_win, &g_download_gad, (ULONG)-1);
@@ -999,6 +1037,7 @@ static void draw_ui(void)
     draw_field_frame(&g_user_gad);
     draw_password_field();
     draw_button(BTN_CONNECT_X, BTN_CONNECT_Y, BTN_CONNECT_W, BTN_CONNECT_H, "Connect");
+    draw_button(BTN_SAVE_X, BTN_SAVE_Y, BTN_SAVE_W, BTN_SAVE_H, "Save");
 
     draw_text_xy((WORD)(g_path_gad.LeftEdge - 55), 25, "Local:");
     draw_field_frame(&g_path_gad);
@@ -2898,6 +2937,19 @@ static void dialog_draw_button(struct Window *win, WORD x, WORD y, WORD w, WORD 
     Text(win->RPort, (STRPTR)label, text_len(label));
 }
 
+static void dialog_clear_interior(struct Window *win)
+{
+    WORD right;
+    WORD bottom;
+    if (!win)
+        return;
+    right = (WORD)(win->Width - win->BorderRight - 1);
+    bottom = (WORD)(win->Height - win->BorderBottom - 1);
+    SetAPen(win->RPort, 0);
+    RectFill(win->RPort, win->BorderLeft, win->BorderTop, right, bottom);
+    SetAPen(win->RPort, 1);
+}
+
 static void dialog_text(struct Window *win, WORD x, WORD y, const char *text)
 {
     if (!win || !text)
@@ -2946,9 +2998,7 @@ static int confirm_delete_dialog(const char *where, const char *name)
 
     while (running) {
         SetDrMd(win->RPort, JAM1);
-        SetAPen(win->RPort, 0);
-        RectFill(win->RPort, 0, 10, (WORD)(win->Width - 1), (WORD)(win->Height - 1));
-        SetAPen(win->RPort, 1);
+        dialog_clear_interior(win);
         dialog_text(win, 12, 25, "Delete selected items?");
         dialog_text(win, 12, 40, where ? where : "");
         dialog_text(win, 12, 55, name ? name : "");
@@ -3180,6 +3230,354 @@ static void ftp_make_directory_action(void)
     g_transfer_busy = 0;
 }
 
+static void address_copy_field(char *dst, int size, const char *src)
+{
+    int i = 0;
+    if (!dst || size <= 0)
+        return;
+    if (!src)
+        src = "";
+    while (*src && i < size - 1) {
+        char c = *src++;
+        if (c == '\t' || c == '\r' || c == '\n')
+            c = ' ';
+        dst[i++] = c;
+    }
+    dst[i] = 0;
+}
+
+static int address_parse_line(char *line, char **fields, int field_count)
+{
+    int count = 1;
+    char *p;
+    if (!line || !fields || field_count <= 0)
+        return 0;
+    fields[0] = line;
+    for (p = line; *p; ++p) {
+        if (*p == '\r' || *p == '\n') {
+            *p = 0;
+            break;
+        }
+        if (*p == '\t' && count < field_count) {
+            *p = 0;
+            fields[count++] = p + 1;
+        }
+    }
+    return count;
+}
+
+static void address_add_line(char *line)
+{
+    char *fields[6];
+    struct AddressEntry *entry;
+    if (!line || !line[0] || line[0] == '#' ||
+        g_address_count >= MAX_ADDRESS_ENTRIES)
+        return;
+    if (address_parse_line(line, fields, 6) != 6)
+        return;
+    entry = &g_addresses[g_address_count++];
+    address_copy_field(entry->name, sizeof(entry->name), fields[0]);
+    address_copy_field(entry->host, sizeof(entry->host), fields[1]);
+    address_copy_field(entry->port, sizeof(entry->port), fields[2]);
+    address_copy_field(entry->user, sizeof(entry->user), fields[3]);
+    address_copy_field(entry->pass, sizeof(entry->pass), fields[4]);
+    address_copy_field(entry->remote_path, sizeof(entry->remote_path), fields[5]);
+}
+
+static void address_book_load(void)
+{
+    BPTR fh;
+    char line[512];
+    LONG got;
+    int pos = 0;
+    g_address_count = 0;
+    fh = Open((STRPTR)ADDRESS_BOOK_FILE, MODE_OLDFILE);
+    if (!fh)
+        return;
+    while (g_address_count < MAX_ADDRESS_ENTRIES) {
+        got = Read(fh, line + pos, 1);
+        if (got != 1)
+            break;
+        if (line[pos] == '\n' || line[pos] == '\r' || pos >= (int)sizeof(line) - 2) {
+            line[pos] = 0;
+            address_add_line(line);
+            pos = 0;
+        } else {
+            ++pos;
+        }
+    }
+    if (pos > 0) {
+        line[pos] = 0;
+        address_add_line(line);
+    }
+    Close(fh);
+}
+
+static int address_book_save(void)
+{
+    BPTR fh;
+    int i;
+    fh = Open((STRPTR)ADDRESS_BOOK_FILE, MODE_NEWFILE);
+    if (!fh)
+        return 0;
+    {
+        const char *header = "# name\thost\tport\tuser\tpassword\tremote path\n";
+        Write(fh, (APTR)header, text_len(header));
+    }
+    for (i = 0; i < g_address_count; ++i) {
+        char line[512];
+        struct AddressEntry *entry = &g_addresses[i];
+        line[0] = 0;
+        append_text(line, sizeof(line), entry->name);
+        append_text(line, sizeof(line), "\t");
+        append_text(line, sizeof(line), entry->host);
+        append_text(line, sizeof(line), "\t");
+        append_text(line, sizeof(line), entry->port);
+        append_text(line, sizeof(line), "\t");
+        append_text(line, sizeof(line), entry->user);
+        append_text(line, sizeof(line), "\t");
+        append_text(line, sizeof(line), entry->pass);
+        append_text(line, sizeof(line), "\t");
+        append_text(line, sizeof(line), entry->remote_path);
+        append_text(line, sizeof(line), "\n");
+        Write(fh, line, text_len(line));
+    }
+    Close(fh);
+    return 1;
+}
+
+static int address_find_name(const char *name)
+{
+    int i;
+    for (i = 0; i < g_address_count; ++i) {
+        if (text_equal_ci(g_addresses[i].name, name))
+            return i;
+    }
+    return -1;
+}
+
+static void address_store_current(const char *name)
+{
+    int index = address_find_name(name);
+    struct AddressEntry *entry;
+    if (index < 0) {
+        if (g_address_count >= MAX_ADDRESS_ENTRIES) {
+            set_status_draw("Address book is full");
+            return;
+        }
+        index = g_address_count++;
+    }
+    entry = &g_addresses[index];
+    address_copy_field(entry->name, sizeof(entry->name), name);
+    address_copy_field(entry->host, sizeof(entry->host), g_host);
+    address_copy_field(entry->port, sizeof(entry->port), g_port);
+    address_copy_field(entry->user, sizeof(entry->user), g_user);
+    address_copy_field(entry->pass, sizeof(entry->pass), g_pass);
+    address_copy_field(entry->remote_path, sizeof(entry->remote_path), g_remote_path);
+    if (address_book_save())
+        set_status_draw("Address saved");
+    else
+        set_status_draw("Address book save failed");
+}
+
+static void address_apply(int index)
+{
+    if (index < 0 || index >= g_address_count)
+        return;
+    copy_limited(g_host, sizeof(g_host), g_addresses[index].host);
+    copy_limited(g_port, sizeof(g_port), g_addresses[index].port);
+    copy_limited(g_user, sizeof(g_user), g_addresses[index].user);
+    copy_limited(g_pass, sizeof(g_pass), g_addresses[index].pass);
+    copy_limited(g_remote_path, sizeof(g_remote_path), g_addresses[index].remote_path);
+    g_host_si.BufferPos = g_host_si.NumChars = text_len(g_host);
+    g_port_si.BufferPos = g_port_si.NumChars = text_len(g_port);
+    g_user_si.BufferPos = g_user_si.NumChars = text_len(g_user);
+    set_status("Address loaded");
+}
+
+static void draw_address_book(struct Window *win, struct Gadget *name_gad,
+                              int selected, int top)
+{
+    int i;
+    int rows = 10;
+    char line[180];
+    if (!win)
+        return;
+    SetDrMd(win->RPort, JAM1);
+    dialog_clear_interior(win);
+    dialog_text(win, 16, 27, "Entry name:");
+    Move(win->RPort, 105, 16);
+    Draw(win->RPort, 330, 16);
+    Draw(win->RPort, 330, 30);
+    Draw(win->RPort, 105, 30);
+    Draw(win->RPort, 105, 16);
+    Move(win->RPort, 16, 44);
+    Draw(win->RPort, 540, 44);
+    Draw(win->RPort, 540, 146);
+    Draw(win->RPort, 16, 146);
+    Draw(win->RPort, 16, 44);
+    for (i = 0; i < rows && top + i < g_address_count; ++i) {
+        int index = top + i;
+        WORD y = (WORD)(56 + i * 9);
+        line[0] = 0;
+        append_text(line, sizeof(line), g_addresses[index].name);
+        append_text(line, sizeof(line), "  ");
+        append_text(line, sizeof(line), g_addresses[index].host);
+        append_text(line, sizeof(line), "  ");
+        append_text(line, sizeof(line), g_addresses[index].user);
+        while (line[0] && TextLength(win->RPort, (STRPTR)line, text_len(line)) > 514)
+            line[text_len(line) - 1] = 0;
+        if (index == selected) {
+            SetAPen(win->RPort, 1);
+            RectFill(win->RPort, 18, (WORD)(y - 7), 538, (WORD)(y + 1));
+            SetAPen(win->RPort, 0);
+            Move(win->RPort, 20, y);
+            Text(win->RPort, (STRPTR)line, text_len(line));
+        } else {
+            dialog_text(win, 20, y, line);
+        }
+        SetAPen(win->RPort, 1);
+    }
+    dialog_draw_button(win, 16, 160, 52, 16, "Use");
+    dialog_draw_button(win, 80, 160, 108, 16, "Save current");
+    dialog_draw_button(win, 200, 160, 62, 16, "Delete");
+    dialog_draw_button(win, 280, 160, 28, 16, "^");
+    dialog_draw_button(win, 316, 160, 28, 16, "v");
+    dialog_draw_button(win, 454, 160, 70, 16, "Close");
+    RefreshGadgets(name_gad, win, 0);
+}
+
+static void show_address_book_dialog(void)
+{
+    struct NewWindow nw;
+    struct Window *win;
+    struct IntuiMessage *msg;
+    struct StringInfo name_si;
+    struct Gadget name_gad;
+    char name[ADDRESS_NAME_SIZE];
+    char undo[ADDRESS_NAME_SIZE];
+    int selected = -1;
+    int top = 0;
+    int running = 1;
+
+    name[0] = 0;
+    undo[0] = 0;
+    memset(&name_si, 0, sizeof(name_si));
+    memset(&name_gad, 0, sizeof(name_gad));
+    name_si.Buffer = (STRPTR)name;
+    name_si.UndoBuffer = (STRPTR)undo;
+    name_si.MaxChars = ADDRESS_NAME_SIZE;
+    name_gad.LeftEdge = 106;
+    name_gad.TopEdge = 17;
+    name_gad.Width = 223;
+    name_gad.Height = 12;
+    name_gad.Flags = GFLG_GADGHCOMP;
+    name_gad.Activation = GACT_RELVERIFY | GACT_STRINGLEFT;
+    name_gad.GadgetType = GTYP_STRGADGET;
+    name_gad.SpecialInfo = (APTR)&name_si;
+    name_gad.GadgetID = 90;
+
+    memset(&nw, 0, sizeof(nw));
+    nw.LeftEdge = 30;
+    nw.TopEdge = 24;
+    nw.Width = 560;
+    nw.Height = 190;
+    nw.DetailPen = 0;
+    nw.BlockPen = 1;
+    nw.IDCMPFlags = IDCMP_CLOSEWINDOW | IDCMP_MOUSEBUTTONS | IDCMP_REFRESHWINDOW | IDCMP_GADGETUP;
+    nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_ACTIVATE | WFLG_SMART_REFRESH;
+    nw.Title = (STRPTR)"MiniFTP Address Book";
+    nw.MinWidth = 460;
+    nw.MinHeight = 180;
+    nw.MaxWidth = 640;
+    nw.MaxHeight = 240;
+    nw.Type = WBENCHSCREEN;
+
+    address_book_load();
+    win = OpenWindow(&nw);
+    if (!win) {
+        nw.LeftEdge = 0;
+        nw.TopEdge = 0;
+        win = OpenWindow(&nw);
+    }
+    if (!win) {
+        set_status_draw("Address book window failed");
+        return;
+    }
+    AddGadget(win, &name_gad, (ULONG)-1);
+    RefreshGadgets(&name_gad, win, 0);
+    draw_address_book(win, &name_gad, selected, top);
+
+    while (running) {
+        Wait(1UL << win->UserPort->mp_SigBit);
+        while ((msg = (struct IntuiMessage *)GetMsg(win->UserPort))) {
+            ULONG cls = msg->Class;
+            UWORD code = msg->Code;
+            WORD mx = msg->MouseX;
+            WORD my = msg->MouseY;
+            ReplyMsg((struct Message *)msg);
+            if (cls == IDCMP_CLOSEWINDOW) {
+                running = 0;
+            } else if (cls == IDCMP_REFRESHWINDOW) {
+                BeginRefresh(win);
+                EndRefresh(win, TRUE);
+                draw_address_book(win, &name_gad, selected, top);
+            } else if (cls == IDCMP_MOUSEBUTTONS && code == SELECTUP) {
+                if (mx >= 18 && mx <= 538 && my >= 49 && my < 139) {
+                    int row = (my - 49) / 9;
+                    int index = top + row;
+                    if (index >= 0 && index < g_address_count) {
+                        selected = index;
+                        copy_limited(name, sizeof(name), g_addresses[index].name);
+                        name_si.BufferPos = name_si.NumChars = text_len(name);
+                    }
+                } else if (dialog_button_hit(mx, my, 16, 160, 52, 16) && selected >= 0) {
+                    address_apply(selected);
+                    running = 0;
+                } else if (dialog_button_hit(mx, my, 80, 160, 108, 16)) {
+                    if (!name[0])
+                        set_status_draw("Address name required");
+                    else if (!g_host[0])
+                        set_status_draw("Host required");
+                    else {
+                        address_store_current(name);
+                        address_book_load();
+                        selected = address_find_name(name);
+                        if (selected >= 0 && selected < top)
+                            top = selected;
+                        if (selected >= top + 10)
+                            top = selected - 9;
+                    }
+                } else if (dialog_button_hit(mx, my, 200, 160, 62, 16) && selected >= 0) {
+                    int i;
+                    for (i = selected; i + 1 < g_address_count; ++i)
+                        g_addresses[i] = g_addresses[i + 1];
+                    --g_address_count;
+                    if (selected >= g_address_count)
+                        selected = g_address_count - 1;
+                    if (top > 0 && top + 10 > g_address_count)
+                        --top;
+                    address_book_save();
+                } else if (dialog_button_hit(mx, my, 280, 160, 28, 16)) {
+                    if (top > 0)
+                        --top;
+                } else if (dialog_button_hit(mx, my, 316, 160, 28, 16)) {
+                    if (top + 10 < g_address_count)
+                        ++top;
+                } else if (dialog_button_hit(mx, my, 454, 160, 70, 16)) {
+                    running = 0;
+                }
+                if (running)
+                    draw_address_book(win, &name_gad, selected, top);
+            }
+        }
+    }
+    RemoveGadget(win, &name_gad);
+    CloseWindow(win);
+    if (g_win)
+        draw_ui();
+}
+
 static void show_info_dialog(void)
 {
     struct NewWindow nw;
@@ -3194,7 +3592,7 @@ static void show_info_dialog(void)
     nw.LeftEdge = 10;
     nw.TopEdge = 20;
     nw.Width = 620;
-    nw.Height = 110;
+    nw.Height = 132;
     nw.DetailPen = 0;
     nw.BlockPen = 1;
     nw.IDCMPFlags = IDCMP_CLOSEWINDOW | IDCMP_MOUSEBUTTONS | IDCMP_REFRESHWINDOW;
@@ -3205,7 +3603,7 @@ static void show_info_dialog(void)
     nw.Screen = 0;
     nw.BitMap = 0;
     nw.MinWidth = 300;
-    nw.MinHeight = 80;
+    nw.MinHeight = 100;
     nw.MaxWidth = 640;
     nw.MaxHeight = 200;
     nw.Type = WBENCHSCREEN;
@@ -3218,15 +3616,14 @@ static void show_info_dialog(void)
 
     while (running) {
         SetDrMd(win->RPort, JAM1);
-        SetAPen(win->RPort, 0);
-        RectFill(win->RPort, 0, 10, (WORD)(win->Width - 1), (WORD)(win->Height - 1));
-        SetAPen(win->RPort, 1);
+        dialog_clear_interior(win);
         dialog_text(win, 12, 25, "MiniFTP for Kick1.3");
         dialog_text(win, 12, 40, "Version: " MINI_FTP_VERSION);
         dialog_text(win, 12, 55, "by Marcel Jaehne");
         dialog_text(win, 12, 70, "(c) 2026");
-        dialog_text(win, 12, 85, "If you want to buy me a coffe, send me a buck to: https://paypal.me/mytubefree");
-        dialog_draw_button(win, 290, 92, 58, 16, "OK");
+        dialog_text(win, 12, 85, "If you want to buy me a coffee, send me a buck to:");
+        dialog_text(win, 12, 100, "https://paypal.me/mytubefree");
+        dialog_draw_button(win, 290, 110, 58, 14, "OK");
 
         Wait(1UL << win->UserPort->mp_SigBit);
         while ((msg = (struct IntuiMessage *)GetMsg(win->UserPort))) {
@@ -3242,7 +3639,7 @@ static void show_info_dialog(void)
                 EndRefresh(win, TRUE);
                 break;
             } else if (cls == IDCMP_MOUSEBUTTONS && code == SELECTUP) {
-                if (dialog_button_hit(mx, my, 290, 92, 58, 16))
+                if (dialog_button_hit(mx, my, 290, 110, 58, 14))
                     running = 0;
             }
         }
@@ -3484,6 +3881,13 @@ static void handle_button_action(UWORD gid)
 {
     if (gid == GID_BTN_CONNECT) {
         ftp_connect_login();
+    } else if (gid == GID_BTN_SAVE) {
+        if (!g_host[0]) {
+            set_status_draw("Host required");
+        } else {
+            address_book_load();
+            address_store_current(g_host);
+        }
     } else if (gid == GID_BTN_LOAD) {
         load_local_path();
     } else if (gid == GID_BTN_UPLOAD) {
@@ -3499,7 +3903,7 @@ static void handle_button_action(UWORD gid)
 
 static int is_button_gadget_id(UWORD gid)
 {
-    return gid >= GID_BTN_CONNECT && gid <= GID_BTN_DIRPLUS;
+    return gid >= GID_BTN_CONNECT && gid <= GID_BTN_SAVE;
 }
 
 static void handle_mouse_down(WORD mx, WORD my)
@@ -3754,6 +4158,8 @@ int main(int argc, char **argv)
                     UWORD next_code = item ? item->NextSelect : MENUNULL;
                     if (item == &g_menu_info)
                         show_info_dialog();
+                    else if (item == &g_menu_address_open)
+                        show_address_book_dialog();
                     code = next_code;
                 }
             } else if (cls == IDCMP_GADGETUP) {

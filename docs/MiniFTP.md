@@ -7,10 +7,10 @@ GUI application and uses `bsdsocket.library` only; it does not call internal
 Version identity:
 
 ```text
-MiniFTP v1.2 by Marcel Jaehne (c)2026
+MiniFTP v1.3 by Marcel Jaehne (c)2026
 ```
 
-The window title is shortened to `MiniFTP v1.2`; the full author/version text is shown in the `Info` dialog.
+The window title is shortened to `MiniFTP v1.3`; the full author/version text is shown in the `Info` dialog.
 
 ## Shell Usage
 
@@ -48,7 +48,7 @@ The window contains:
   - `<-` downloads the selected remote file/directory or all marked remote entries recursively
   - `DIR +` opens a small input window and creates a remote directory with `MKD` if it does not already exist
   - `Delete` deletes the selected entries from the active local or FTP pane recursively after one confirmation
-  - `Projekt -> Info` opens the version/about dialog
+  - `Project -> Info` opens the version/about dialog
 - a status/error line for connection failures, timeouts, and transfer progress
 
 ## Workbench Usage
@@ -87,6 +87,10 @@ required in the source tree.
 No AppWindow, drag-and-drop, ASL requester, GadTools, ReAction, or MUI support is
 used. Those APIs are intentionally avoided for AmigaOS 1.3 compatibility.
 
+## Address book
+
+Open `Address Book -> Open` to manage saved FTP connections. Each entry contains a display name, host, port, user, password, and initial remote path. `Use` copies an entry into the main connection fields without connecting automatically. `Save current` creates or updates an entry, and `Delete` removes it. The data file is `MiniFTP.addressbook` in the startup directory. Passwords are stored as plain text.
+
 ## Workflow
 
 1. Enter host, optional port, user, and password. Empty Port uses FTP port 21. Decimal ports from 1 through 65535 are accepted.
@@ -104,7 +108,7 @@ used. Those APIs are intentionally avoided for AmigaOS 1.3 compatibility.
    Local trees are removed with AmigaDOS `DeleteFile()`, remote trees with `DELE`/`RMD`.
 10. Double-click a remote directory to enter it with `CWD`.
 11. Double-click remote `..` to go up with `CDUP`.
-12. Use `Projekt -> Info` to show the MiniFTP version/about dialog.
+12. Use `Project -> Info` to show the MiniFTP version/about dialog.
 
 ## FTP Support
 
@@ -155,7 +159,7 @@ corrupted uploads.
 - No TLS/FTPS.
 - No rename, mkdir, or active `PORT` mode.
 - No Workbench AppWindow or drag-and-drop support on AmigaOS 1.3.
-- A classic menu bar provides `Projekt -> Info`; the main actions use real Intuition buttons and double-clicks.
+- A classic menu bar provides `Project -> Info`; the main actions use real Intuition buttons and double-clicks.
 - The `Info` dialog uses a plain OS1.3 Intuition window, not ASL/GadTools.
 
 ## Connection Status
@@ -267,7 +271,7 @@ Then:
 12. Double-click remote `..` and confirm the parent directory loads.
 13. Select multiple local or remote entries, delete them, confirm one prompt appears, and confirm the list refreshes.
 14. Delete a selected local file, confirm the prompt, and confirm the local list refreshes.
-15. Use `Projekt -> Info` and verify the version/about dialog opens and closes.
+15. Use `Project -> Info` and verify the version/about dialog opens and closes.
 16. Try an unreachable/wrong host, confirm `Connect failed: timeout` or a clear
     error is shown, then connect to a valid server without restarting the GUI.
 17. Interrupt or provoke a failed upload, confirm the GUI returns to the event
