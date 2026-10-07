@@ -5,7 +5,7 @@ MiniFTP is a classic AmigaOS 1.3 Intuition FTP client.
 Version:
 
 ```text
-MiniFTP v1.3 by Marcel Jaehne (c)2026
+MiniFTP v1.4 by Marcel Jaehne (c)2026
 ```
 
 It was split out of TheWire13 and remains designed for Kickstart/Workbench 1.3,
@@ -16,8 +16,11 @@ APIs.
 ## Features
 
 - Plain Intuition GUI, no GadTools/MUI/ReAction/ASL.
-- Starts fullscreen on the current Workbench screen.
+- Starts on the Workbench screen with its screen title bar accessible.
+- `Project -> Send to back` brings windows behind MiniFTP into view.
 - Dynamically resizable two-pane local/remote file browser.
+- Directory lists grow with available memory instead of stopping at 128 entries.
+- Disconnect cancels active operations and releases the FTP connection.
 - Shell and Workbench startup support.
 - Workbench ToolTypes for host, user, password, local path, remote path,
   autoconnect, and port.
@@ -61,4 +64,4 @@ build/MiniFTP
 
 ## Documentation
 
-See [docs/MiniFTP.md](docs/MiniFTP.md).
+See [docs/MiniFTP.md](docs/MiniFTP.md) and the [changelog](docs/MiniFTP.md#changelog).

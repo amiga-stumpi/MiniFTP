@@ -19,7 +19,7 @@
 #include "amitcp13/bsdsocket.h"
 #include "amitcp13/stack_ipc.h"
 
-#define MINI_FTP_VERSION "v1.3"
+#define MINI_FTP_VERSION "v1.4"
 #define MINI_FTP_GUI_TITLE "MiniFTP " MINI_FTP_VERSION
 #define MINI_FTP_FULL_ID "MiniFTP " MINI_FTP_VERSION " by Marcel Jaehne (c)2026"
 #define FTP_PORT 21
@@ -36,8 +36,6 @@
 #define PASS_BUF_SIZE 48
 #define PATH_BUF_SIZE 160
 #define NAME_BUF_SIZE 64
-#define MAX_LOCAL_ENTRIES 128
-#define MAX_REMOTE_ENTRIES 128
 #define MAX_ADDRESS_ENTRIES 32
 #define ADDRESS_NAME_SIZE 40
 #define ADDRESS_BOOK_FILE "MiniFTP.addressbook"
@@ -69,6 +67,7 @@
 #define GID_BTN_DELETE 24
 #define GID_BTN_DIRPLUS 25
 #define GID_BTN_SAVE 26
+#define GID_BTN_DISCONNECT 27
 
 #define ROW_H 9
 #define SCROLL_W 10
@@ -133,8 +132,10 @@ static char g_host_undo[HOST_BUF_SIZE];
 static char g_port_undo[PORT_BUF_SIZE];
 static char g_user_undo[USER_BUF_SIZE];
 static char g_path_undo[PATH_BUF_SIZE];
-static struct FtpEntry g_local_entries[MAX_LOCAL_ENTRIES];
-static struct FtpEntry g_remote_entries[MAX_REMOTE_ENTRIES];
+static struct FtpEntry *g_local_entries;
+static struct FtpEntry *g_remote_entries;
+static int g_local_incomplete;
+static int g_remote_incomplete;
 static int g_local_count;
 static int g_remote_count;
 static int g_local_sel = -1;
@@ -146,6 +147,10 @@ static int g_pressed_button;
 static int g_active_pane = ACTIVE_PANE_REMOTE;
 static int g_pass_active;
 static int g_transfer_busy;
+static int g_cancel_requested;
+static int g_close_requested;
+static int g_fields_disabled;
+static int process_operation_events(void);
 static int g_last_local_click_index = -1;
 static ULONG g_last_local_click_seconds;
 static ULONG g_last_local_click_micros;
@@ -169,17 +174,17 @@ static WORD BTN_SAVE_Y = 48;
 static WORD BTN_SAVE_W = 48;
 static WORD BTN_SAVE_H = 14;
 static WORD BTN_LOAD_X = 520;
-static WORD BTN_LOAD_Y = 16;
+static WORD BTN_LOAD_Y = 15;
 static WORD BTN_LOAD_W = 42;
 static WORD BTN_LOAD_H = 14;
 static WORD BTN_UPLOAD_X = 300;
 static WORD BTN_UPLOAD_Y = 94;
 static WORD BTN_UPLOAD_W = 38;
-static WORD BTN_UPLOAD_H = 18;
+static WORD BTN_UPLOAD_H = 16;
 static WORD BTN_DOWNLOAD_X = 300;
 static WORD BTN_DOWNLOAD_Y = 122;
 static WORD BTN_DOWNLOAD_W = 38;
-static WORD BTN_DOWNLOAD_H = 18;
+static WORD BTN_DOWNLOAD_H = 16;
 static WORD BTN_DELETE_X = 294;
 static WORD BTN_DELETE_Y = 168;
 static WORD BTN_DELETE_W = 62;
@@ -207,6 +212,47 @@ static WORD STATUS_TEXT_Y = 187;
 static int g_visible_rows = 8;
 static struct AddressEntry g_addresses[MAX_ADDRESS_ENTRIES];
 static int g_address_count;
+
+/* Allocation size travels with each list, including recursive snapshots. */
+static void free_entries(struct FtpEntry *entries)
+{
+    ULONG *block;
+    if (!entries)
+        return;
+    block = (ULONG *)entries - 1;
+    FreeMem(block, sizeof(ULONG) + *block * sizeof(struct FtpEntry));
+}
+
+static int reserve_entries(struct FtpEntry **entries, int needed)
+{
+    ULONG old_capacity = *entries ? *((ULONG *)*entries - 1) : 0;
+    ULONG capacity = old_capacity ? old_capacity : 32;
+    ULONG *block;
+    if (needed < 0 || (ULONG)needed > (0x7fffffffUL - sizeof(ULONG)) / sizeof(struct FtpEntry))
+        return 0;
+    if ((ULONG)needed <= old_capacity)
+        return 1;
+    while (capacity < (ULONG)needed) {
+        if (capacity > (0x7fffffffUL - sizeof(ULONG)) / sizeof(struct FtpEntry) / 2) {
+            capacity = needed;
+            break;
+        }
+        capacity *= 2;
+    }
+    block = (ULONG *)AllocMem(sizeof(ULONG) + capacity * sizeof(struct FtpEntry), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!block && capacity != (ULONG)needed) {
+        capacity = needed;
+        block = (ULONG *)AllocMem(sizeof(ULONG) + capacity * sizeof(struct FtpEntry), MEMF_PUBLIC | MEMF_CLEAR);
+    }
+    if (!block)
+        return 0;
+    *block = capacity;
+    if (*entries)
+        CopyMem(*entries, block + 1, old_capacity * sizeof(struct FtpEntry));
+    free_entries(*entries);
+    *entries = (struct FtpEntry *)(block + 1);
+    return 1;
+}
 
 static int clamp_top(int top, int count);
 static int in_rect(WORD mx, WORD my, WORD x, WORD y, WORD w, WORD h);
@@ -250,6 +296,10 @@ static struct Gadget g_load_gad = {
     0, 520, 16, 42, 14, GFLG_GADGHCOMP, GACT_RELVERIFY,
     GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_LOAD, 0
 };
+static struct Gadget g_disconnect_gad = {
+    0, 376, 48, 88, 14, GFLG_GADGHCOMP, GACT_RELVERIFY,
+    GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_DISCONNECT, 0
+};
 static struct Gadget g_upload_gad = {
     0, 300, 94, 38, 18, GFLG_GADGHCOMP, GACT_RELVERIFY,
     GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_UPLOAD, 0
@@ -266,8 +316,10 @@ static struct Gadget g_dirplus_gad = {
     0, 294, 146, 62, 14, GFLG_GADGHCOMP, GACT_RELVERIFY,
     GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_DIRPLUS, 0
 };
+static struct IntuiText g_menu_back_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Send to back", 0 };
+static struct MenuItem g_menu_back = { 0, 0, 10, 112, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_back_text, 0, 0, 0, 0 };
 static struct IntuiText g_menu_info_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Info", 0 };
-static struct MenuItem g_menu_info = { 0, 0, 0, 60, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_info_text, 0, 0, 0, 0 };
+static struct MenuItem g_menu_info = { &g_menu_back, 0, 0, 112, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_info_text, 0, 0, 0, 0 };
 static struct IntuiText g_menu_address_open_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Open", 0 };
 static struct MenuItem g_menu_address_open = { 0, 0, 0, 48, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_address_open_text, 0, 0, 0, 0 };
 static struct Menu g_menu_address = { 0, 70, 0, 98, 10, MENUENABLED, (UBYTE *)"Address Book", &g_menu_address_open, 0, 0, 0, 0 };
@@ -283,38 +335,33 @@ static struct NewWindow g_new_window = {
     (STRPTR)MINI_FTP_GUI_TITLE,
     0,
     0,
-    460, 150,
+    560, 186,
     1000, 600,
     WBENCHSCREEN
 };
 
 static void set_initial_window_size(void)
 {
-    struct Screen *screen = 0;
-    WORD width;
+    struct Screen screen;
+    WORD top;
     WORD height;
 
-    if (IntuitionBase) {
-        screen = IntuitionBase->ActiveScreen;
-        if (!screen)
-            screen = IntuitionBase->FirstScreen;
-    }
-    if (!screen)
+    /* WBENCHSCREEN is also the screen type used by OpenWindow below. */
+    if (!GetScreenData(&screen, sizeof(screen), WBENCHSCREEN, 0))
         return;
 
-    width = screen->Width;
-    height = screen->Height;
-    if (width < g_new_window.MinWidth)
-        width = g_new_window.MinWidth;
-    if (height < g_new_window.MinHeight)
-        height = g_new_window.MinHeight;
-
+    top = (WORD)(screen.BarHeight + 1);
+    height = (WORD)(screen.Height - top);
+    if (height < g_new_window.MinHeight) {
+        top = 0;
+        height = screen.Height;
+    }
     g_new_window.LeftEdge = 0;
-    g_new_window.TopEdge = 0;
-    g_new_window.Width = width;
+    g_new_window.TopEdge = top;
+    g_new_window.Width = screen.Width;
     g_new_window.Height = height;
-    g_new_window.MaxWidth = width;
-    g_new_window.MaxHeight = height;
+    g_new_window.MaxWidth = screen.Width;
+    g_new_window.MaxHeight = screen.Height;
 }
 
 static void update_layout(void)
@@ -329,11 +376,15 @@ static void update_layout(void)
     WORD status_h = STATUS_H;
     WORD path_x;
     WORD load_x;
+    WORD content_right;
 
     if (win_w < g_new_window.MinWidth)
         win_w = g_new_window.MinWidth;
     if (win_h < g_new_window.MinHeight)
         win_h = g_new_window.MinHeight;
+
+    /* Leave four pixels between content and the enclosing frame. */
+    content_right = (WORD)(win_w - (g_win ? g_win->BorderRight : 0) - 6);
 
     g_host_gad.LeftEdge = 55;
     g_host_gad.TopEdge = 16;
@@ -361,12 +412,12 @@ static void update_layout(void)
     BTN_SAVE_W = 48;
     BTN_SAVE_H = BTN_CONNECT_H;
 
-    load_x = (WORD)(win_w - 58);
+    load_x = (WORD)(content_right - 42);
     if (load_x < 410)
         load_x = 410;
     path_x = 360;
     BTN_LOAD_X = load_x;
-    BTN_LOAD_Y = 16;
+    BTN_LOAD_Y = 15;
     BTN_LOAD_W = 42;
     BTN_LOAD_H = 14;
     g_path_gad.LeftEdge = path_x;
@@ -377,19 +428,19 @@ static void update_layout(void)
     g_path_gad.Height = 12;
 
     STATUS_X = 8;
-    STATUS_Y = (WORD)(win_h - status_h - 5);
-    STATUS_W = (WORD)(win_w - 18);
+    STATUS_Y = (WORD)(win_h - (g_win ? g_win->BorderBottom : 0) - status_h - 5);
+    STATUS_W = (WORD)(content_right - STATUS_X);
     STATUS_TEXT_Y = (WORD)(STATUS_Y + 14);
 
     LOCAL_X = 10;
     LOCAL_Y = list_top;
-    usable_w = (WORD)(win_w - 20 - mid_w - (gap * 2));
+    usable_w = (WORD)(content_right - LOCAL_X - mid_w - (gap * 2));
     pane_w = (WORD)(usable_w / 2);
     if (pane_w < 120)
         pane_w = 120;
     LOCAL_W = pane_w;
     REMOTE_X = (WORD)(LOCAL_X + LOCAL_W + mid_w + (gap * 2));
-    REMOTE_W = (WORD)(win_w - REMOTE_X - 12);
+    REMOTE_W = (WORD)(content_right - REMOTE_X);
     if (REMOTE_W < 120)
         REMOTE_W = 120;
     REMOTE_Y = list_top;
@@ -404,17 +455,17 @@ static void update_layout(void)
     BTN_UPLOAD_X = (WORD)(LOCAL_X + LOCAL_W + gap);
     BTN_UPLOAD_Y = LOCAL_Y;
     BTN_UPLOAD_W = 38;
-    BTN_UPLOAD_H = 18;
+    BTN_UPLOAD_H = 16;
     BTN_DOWNLOAD_X = BTN_UPLOAD_X;
-    BTN_DOWNLOAD_Y = (WORD)(BTN_UPLOAD_Y + 22);
+    BTN_DOWNLOAD_Y = (WORD)(BTN_UPLOAD_Y + 18);
     BTN_DOWNLOAD_W = 38;
-    BTN_DOWNLOAD_H = 18;
+    BTN_DOWNLOAD_H = 16;
     BTN_DIRPLUS_X = (WORD)(BTN_UPLOAD_X - 6);
-    BTN_DIRPLUS_Y = (WORD)(BTN_DOWNLOAD_Y + 22);
+    BTN_DIRPLUS_Y = (WORD)(BTN_DOWNLOAD_Y + 18);
     BTN_DIRPLUS_W = 62;
     BTN_DIRPLUS_H = 14;
     BTN_DELETE_X = BTN_DIRPLUS_X;
-    BTN_DELETE_Y = (WORD)(BTN_DIRPLUS_Y + 20);
+    BTN_DELETE_Y = (WORD)(BTN_DIRPLUS_Y + 16);
     BTN_DELETE_W = 62;
     BTN_DELETE_H = 14;
     g_connect_gad.LeftEdge = BTN_CONNECT_X;
@@ -570,6 +621,7 @@ static int attach_string_gadgets(void)
     AddGadget(g_win, &g_path_gad, (ULONG)-1);
     AddGadget(g_win, &g_connect_gad, (ULONG)-1);
     AddGadget(g_win, &g_save_gad, (ULONG)-1);
+    AddGadget(g_win, &g_disconnect_gad, (ULONG)-1);
     AddGadget(g_win, &g_load_gad, (ULONG)-1);
     AddGadget(g_win, &g_upload_gad, (ULONG)-1);
     AddGadget(g_win, &g_download_gad, (ULONG)-1);
@@ -727,6 +779,8 @@ static void append_text(char *dst, int max_len, const char *src)
 
 static void set_status(const char *text)
 {
+    if (g_cancel_requested)
+        text = "Cancelled/disconnected; partial files may remain";
     copy_limited(g_status, sizeof(g_status), text);
 }
 
@@ -757,6 +811,10 @@ static void append_status_dec(LONG value)
 
 static void set_status_errno(const char *prefix, int err)
 {
+    if (g_cancel_requested) {
+        set_status("Cancelled");
+        return;
+    }
     copy_limited(g_status, sizeof(g_status), prefix);
     append_text(g_status, sizeof(g_status), " errno=");
     append_status_dec((LONG)err);
@@ -770,6 +828,10 @@ static void set_status_kb(const char *prefix, LONG bytes)
     int i = 0;
     int j = 0;
 
+    if (g_cancel_requested) {
+        set_status("Cancelled");
+        return;
+    }
     copy_limited(g_status, sizeof(g_status), prefix);
     append_text(g_status, sizeof(g_status), " ");
     if (value == 0) {
@@ -787,12 +849,27 @@ static void set_status_kb(const char *prefix, LONG bytes)
     append_text(g_status, sizeof(g_status), " KB");
 }
 
-static void draw_text_xy(WORD x, WORD y, const char *text)
+static void draw_text_bounded(WORD x, WORD y, const char *text, WORD width)
 {
+    LONG len;
+    WORD available;
     if (!g_win || !text)
         return;
+    available = (WORD)(g_win->Width - g_win->BorderRight - x - 6);
+    if (available > width)
+        available = width;
+    if (available <= 0)
+        return;
+    len = text_len(text);
+    while (len > 0 && TextLength(g_win->RPort, (STRPTR)text, len) > available)
+        --len;
     Move(g_win->RPort, x, y);
-    Text(g_win->RPort, (STRPTR)text, text_len(text));
+    Text(g_win->RPort, (STRPTR)text, len);
+}
+
+static void draw_text_xy(WORD x, WORD y, const char *text)
+{
+    draw_text_bounded(x, y, text, 32767);
 }
 
 static void draw_box(WORD x, WORD y, WORD w, WORD h)
@@ -889,20 +966,24 @@ static int ftp_entry_before(const struct FtpEntry *a, const struct FtpEntry *b)
 static void sort_entries(struct FtpEntry *entries, int count)
 {
     int start = 0;
+    int gap;
     int i;
-
     if (!entries || count <= 1)
         return;
     if (text_equal(entries[0].name, ".."))
         start = 1;
-    for (i = start + 1; i < count; ++i) {
-        struct FtpEntry item = entries[i];
-        int j = i;
-        while (j > start && ftp_entry_before(&item, &entries[j - 1])) {
-            entries[j] = entries[j - 1];
-            --j;
+    for (gap = (count - start) / 2; gap > 0; gap /= 2) {
+        for (i = start + gap; i < count; ++i) {
+            struct FtpEntry item = entries[i];
+            int j = i;
+            if ((i & 31) == 0 && !process_operation_events())
+                return;
+            while (j >= start + gap && ftp_entry_before(&item, &entries[j - gap])) {
+                entries[j] = entries[j - gap];
+                j -= gap;
+            }
+            entries[j] = item;
         }
-        entries[j] = item;
     }
 }
 
@@ -1003,9 +1084,9 @@ static void draw_list(WORD x, WORD y, WORD w, WORD h,
             !text_equal(entries[entry_index].name, "..")) {
             copy_limited(display, sizeof(display), "[DIR] ");
             append_text(display, sizeof(display), entries[entry_index].name);
-            draw_text_xy((WORD)(x + 4), row_y, display);
+            draw_text_bounded((WORD)(x + 4), row_y, display, (WORD)(text_w - 4));
         } else {
-            draw_text_xy((WORD)(x + 4), row_y, entries[entry_index].name);
+            draw_text_bounded((WORD)(x + 4), row_y, entries[entry_index].name, (WORD)(text_w - 4));
         }
         SetAPen(g_win->RPort, 1);
     }
@@ -1023,10 +1104,14 @@ static void draw_ui(void)
     win_h = g_win->Height;
     SetDrMd(g_win->RPort, JAM1);
     SetAPen(g_win->RPort, 0);
-    RectFill(g_win->RPort, 0, 10, (WORD)(win_w - 1), (WORD)(win_h - 1));
+    RectFill(g_win->RPort, g_win->BorderLeft, g_win->BorderTop,
+             (WORD)(win_w - g_win->BorderRight - 1),
+             (WORD)(win_h - g_win->BorderBottom - 1));
     SetAPen(g_win->RPort, 1);
 
-    draw_box(4, 13, (WORD)(win_w - 10), (WORD)(win_h - 19));
+    draw_box((WORD)(g_win->BorderLeft + 1), (WORD)(g_win->BorderTop + 2),
+             (WORD)(win_w - g_win->BorderLeft - g_win->BorderRight - 3),
+             (WORD)(win_h - g_win->BorderTop - g_win->BorderBottom - 4));
 
     draw_text_xy(12, 25, "Host:");
     draw_text_xy((WORD)(g_port_gad.LeftEdge - 40), 25, "Port:");
@@ -1038,6 +1123,8 @@ static void draw_ui(void)
     draw_password_field();
     draw_button(BTN_CONNECT_X, BTN_CONNECT_Y, BTN_CONNECT_W, BTN_CONNECT_H, "Connect");
     draw_button(BTN_SAVE_X, BTN_SAVE_Y, BTN_SAVE_W, BTN_SAVE_H, "Save");
+    draw_button(g_disconnect_gad.LeftEdge, g_disconnect_gad.TopEdge,
+                g_disconnect_gad.Width, g_disconnect_gad.Height, "Disconnect");
 
     draw_text_xy((WORD)(g_path_gad.LeftEdge - 55), 25, "Local:");
     draw_field_frame(&g_path_gad);
@@ -1056,7 +1143,7 @@ static void draw_ui(void)
 
     clear_rect((WORD)(STATUS_X + 2), (WORD)(STATUS_Y + 3), (WORD)(STATUS_W - 4), 12);
     draw_box(STATUS_X, STATUS_Y, STATUS_W, 17);
-    draw_text_xy((WORD)(STATUS_X + 6), STATUS_TEXT_Y, g_status);
+    draw_text_bounded((WORD)(STATUS_X + 6), STATUS_TEXT_Y, g_status, (WORD)(STATUS_W - 12));
     refresh_string_gadgets();
 }
 
@@ -1067,7 +1154,7 @@ static void draw_status_now(void)
     update_layout();
     clear_rect((WORD)(STATUS_X + 2), (WORD)(STATUS_Y + 3), (WORD)(STATUS_W - 4), 12);
     draw_box(STATUS_X, STATUS_Y, STATUS_W, 17);
-    draw_text_xy((WORD)(STATUS_X + 6), STATUS_TEXT_Y, g_status);
+    draw_text_bounded((WORD)(STATUS_X + 6), STATUS_TEXT_Y, g_status, (WORD)(STATUS_W - 12));
 }
 
 static void set_status_draw(const char *text)
@@ -1156,8 +1243,10 @@ static void build_local_full_path(char *out, int out_len, const char *name)
 
 static void add_local_parent_entry(void)
 {
-    if (g_local_count >= MAX_LOCAL_ENTRIES)
+    if (!reserve_entries(&g_local_entries, g_local_count + 1)) {
+        g_local_incomplete = 1;
         return;
+    }
     copy_limited(g_local_entries[g_local_count].name, NAME_BUF_SIZE, "..");
     g_local_entries[g_local_count].is_dir = 1;
     g_local_entries[g_local_count].selected = 0;
@@ -1354,23 +1443,34 @@ static struct hostent *call_gethostbyname(struct Library *base, const char *name
 static int wait_for_socket(struct Library *base, int fd, int want_write)
 {
     int result;
-    AMITCP13_BSD_FD_ZERO(&g_read_fds);
-    AMITCP13_BSD_FD_ZERO(&g_write_fds);
-    if (want_write)
-        AMITCP13_BSD_FD_SET(fd, &g_write_fds);
-    else
-        AMITCP13_BSD_FD_SET(fd, &g_read_fds);
-    g_timeout.tv_sec = TIMEOUT_SECONDS;
-    g_timeout.tv_usec = 0;
-    g_wait_signals = 0;
-    result = call_waitselect(base, fd + 1, want_write ? 0 : &g_read_fds, want_write ? &g_write_fds : 0, &g_timeout);
-    if (result > 0)
-        return 1;
-    if (result == 0)
-        set_status("Timeout waiting for server");
-    else
-        set_status_errno("WaitSelect failed", call_errno(base));
-    draw_status_now();
+    int polls;
+    if (fd < 0)
+        return 0;
+    for (polls = 0; polls < TIMEOUT_SECONDS * 10; ++polls) {
+        if (!process_operation_events())
+            return 0;
+        AMITCP13_BSD_FD_ZERO(&g_read_fds);
+        AMITCP13_BSD_FD_ZERO(&g_write_fds);
+        if (want_write)
+            AMITCP13_BSD_FD_SET(fd, &g_write_fds);
+        else
+            AMITCP13_BSD_FD_SET(fd, &g_read_fds);
+        g_timeout.tv_sec = 0;
+        g_timeout.tv_usec = 100000;
+        g_wait_signals = 0;
+        result = call_waitselect(base, fd + 1, want_write ? 0 : &g_read_fds,
+                                 want_write ? &g_write_fds : 0, &g_timeout);
+        if (!process_operation_events())
+            return 0;
+        if (result > 0)
+            return 1;
+        if (result < 0 && call_errno(base) != AMITCP13_EINTR) {
+            set_status_errno("WaitSelect failed", call_errno(base));
+            draw_status_now();
+            return 0;
+        }
+    }
+    set_status_draw("Timeout waiting for server");
     return 0;
 }
 
@@ -1506,16 +1606,40 @@ static int make_nonblocking(struct Library *base, int fd)
     return call_ioctl(base, fd, FIONBIO, &g_one) == 0;
 }
 
+static void call_set_socket_signals(struct Library *base, ULONG mask)
+{
+    register ULONG d0 __asm("d0") = mask;
+    register ULONG d1 __asm("d1") = 0;
+    register ULONG d2 __asm("d2") = 0;
+    register struct Library *a6 __asm("a6") = base;
+    __asm volatile ("jsr a6@(-132:W)" : "+r" (d0), "+r" (d1), "+r" (d2)
+                    : "r" (a6) : "a0", "a1", "cc", "memory");
+}
+
 static int resolve_host(struct Library *base, const char *host, ULONG *out_ip)
 {
     struct hostent *he;
+    int retries;
+    int err;
+    if (!process_operation_events())
+        return 0;
     if (parse_ipv4(host, out_ip))
         return 1;
-    he = call_gethostbyname(base, host);
-    if (!he || !he->h_addr_list || !he->h_addr_list[0])
-        return 0;
-    *out_ip = *(ULONG *)he->h_addr_list[0];
-    return 1;
+    for (retries = 0; retries < 3; ++retries) {
+        call_set_socket_signals(base, SIGBREAKF_CTRL_C | (1UL << g_win->UserPort->mp_SigBit));
+        he = call_gethostbyname(base, host);
+        err = call_errno(base);
+        call_set_socket_signals(base, SIGBREAKF_CTRL_C);
+        if (!process_operation_events())
+            return 0;
+        if (he && he->h_addr_list && he->h_addr_list[0]) {
+            *out_ip = *(ULONG *)he->h_addr_list[0];
+            return 1;
+        }
+        if (err != AMITCP13_EINTR)
+            break;
+    }
+    return 0;
 }
 
 static int connect_fd(struct Library *base, int fd, ULONG ip, UWORD port)
@@ -1682,7 +1806,10 @@ static int build_command1(const char *cmd, const char *arg)
 
 static int ftp_command(struct Library *base, int fd, const char *cmd, const char *arg, int *out_code)
 {
-    int len = build_command1(cmd, arg);
+    int len;
+    if (!process_operation_events())
+        return 0;
+    len = build_command1(cmd, arg);
     if (len <= 0)
         return 0;
     ftp_debug_puts("FTP GUI command: ");
@@ -1765,6 +1892,9 @@ static int status_is_timeout(void)
 static void clear_remote_session_state(void)
 {
     g_connected = 0;
+    free_entries(g_remote_entries);
+    g_remote_entries = 0;
+    g_remote_incomplete = 0;
     g_remote_count = 0;
     g_remote_sel = -1;
     g_remote_top = 0;
@@ -1914,7 +2044,7 @@ static void add_remote_line(const char *line)
     const char *name = line;
     const char *p = line;
     int spaces = 0;
-    if (g_remote_count >= MAX_REMOTE_ENTRIES || !line || !*line)
+    if (g_remote_incomplete || !line || !*line)
         return;
     while (*p) {
         if (*p == ' ') {
@@ -1931,6 +2061,10 @@ static void add_remote_line(const char *line)
     }
     if (text_equal(name, ".") || text_equal(name, ".."))
         return;
+    if (!reserve_entries(&g_remote_entries, g_remote_count + 1)) {
+        g_remote_incomplete = 1;
+        return;
+    }
     copy_limited(g_remote_entries[g_remote_count].name, NAME_BUF_SIZE, name);
     g_remote_entries[g_remote_count].is_dir = (line[0] == 'd');
     g_remote_entries[g_remote_count].selected = 0;
@@ -1939,8 +2073,10 @@ static void add_remote_line(const char *line)
 
 static void add_remote_parent_entry(void)
 {
-    if (g_remote_count >= MAX_REMOTE_ENTRIES)
+    if (!reserve_entries(&g_remote_entries, g_remote_count + 1)) {
+        g_remote_incomplete = 1;
         return;
+    }
     copy_limited(g_remote_entries[g_remote_count].name, NAME_BUF_SIZE, "..");
     g_remote_entries[g_remote_count].is_dir = 1;
     g_remote_entries[g_remote_count].selected = 0;
@@ -1988,7 +2124,7 @@ static int ftp_list_remote(void)
     int err;
     int line_pos = 0;
 
-    if (!g_connected)
+    if (!g_connected || !process_operation_events())
         return 0;
     ftp_debug_puts("FTP GUI LIST start\n");
     set_status_draw("Listing remote...");
@@ -2002,6 +2138,9 @@ static int ftp_list_remote(void)
         set_status_draw("LIST failed");
         return 0;
     }
+    free_entries(g_remote_entries);
+    g_remote_entries = 0;
+    g_remote_incomplete = 0;
     g_remote_count = 0;
     g_remote_sel = -1;
     g_remote_top = 0;
@@ -2014,6 +2153,8 @@ static int ftp_list_remote(void)
             return 0;
         }
         for (;;) {
+            if (!process_operation_events())
+                break;
             got = call_recv(g_sock_base, data_fd, g_data_buf, sizeof(g_data_buf), 0);
             if (got > 0) {
                 int i;
@@ -2043,9 +2184,9 @@ static int ftp_list_remote(void)
                 }
                 sort_entries(g_remote_entries, g_remote_count);
                 ftp_debug_puts("FTP GUI LIST end\n");
-                set_status("Remote list loaded");
+                set_status(g_remote_incomplete ? "Remote list incomplete: no memory" : "Remote list loaded");
                 draw_ui();
-                return 1;
+                return !g_remote_incomplete;
             }
             err = call_errno(g_sock_base);
             if (socket_retry_error(err))
@@ -2063,6 +2204,9 @@ static void load_local_path(void)
 {
     BPTR lock;
     struct FileInfoBlock *fib;
+    free_entries(g_local_entries);
+    g_local_entries = 0;
+    g_local_incomplete = 0;
     g_local_count = 0;
     g_local_sel = -1;
     g_local_top = 0;
@@ -2073,6 +2217,7 @@ static void load_local_path(void)
         g_local_count = 0;
         g_local_sel = -1;
         add_local_parent_entry();
+        g_local_incomplete = 1;
         set_status("Cannot enter directory");
         draw_ui();
         return;
@@ -2080,22 +2225,35 @@ static void load_local_path(void)
     fib = (struct FileInfoBlock *)AllocMem(sizeof(*fib), MEMF_PUBLIC | MEMF_CLEAR);
     if (!fib) {
         UnLock(lock);
+        g_local_incomplete = 1;
         set_status("No memory");
         draw_ui();
         return;
     }
     if (Examine(lock, fib)) {
-        while (g_local_count < MAX_LOCAL_ENTRIES && ExNext(lock, fib)) {
+        while (ExNext(lock, fib)) {
+            if (!process_operation_events()) {
+                g_local_incomplete = 1;
+                break;
+            }
+            if (!reserve_entries(&g_local_entries, g_local_count + 1)) {
+                g_local_incomplete = 1;
+                break;
+            }
             copy_limited(g_local_entries[g_local_count].name, NAME_BUF_SIZE, (const char *)fib->fib_FileName);
             g_local_entries[g_local_count].is_dir = fib->fib_DirEntryType > 0;
             g_local_entries[g_local_count].selected = 0;
             ++g_local_count;
         }
+        if (!g_local_incomplete && IoErr() != ERROR_NO_MORE_ENTRIES)
+            g_local_incomplete = 1;
+    } else {
+        g_local_incomplete = 1;
     }
     FreeMem(fib, sizeof(*fib));
     UnLock(lock);
     sort_entries(g_local_entries, g_local_count);
-    set_status("Local directory loaded");
+    set_status(g_local_incomplete ? "Local list incomplete: read/memory error" : "Local directory loaded");
     draw_ui();
 }
 
@@ -2268,6 +2426,8 @@ static int ftp_download_single_selected(void)
             return 0;
         }
         for (;;) {
+            if (!process_operation_events())
+                break;
             got = call_recv(g_sock_base, data_fd, g_data_buf, sizeof(g_data_buf), 0);
             if (got > 0) {
                 wrote = Write(file, g_data_buf, got);
@@ -2359,6 +2519,8 @@ static int ftp_verify_uploaded_file(const char *remote, const char *local_file, 
             return 0;
         }
         for (;;) {
+            if (!process_operation_events())
+                break;
             got = call_recv(g_sock_base, data_fd, g_data_buf, VERIFY_CHUNK_SIZE, 0);
             if (got > 0) {
                 local_got = Read(file, g_verify_buf, got);
@@ -2552,14 +2714,25 @@ static struct FtpEntry *snapshot_entries(struct FtpEntry *entries, int count, in
 
     if (out_count)
         *out_count = 0;
-    copy = (struct FtpEntry *)AllocMem(sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES, MEMF_PUBLIC | MEMF_CLEAR);
-    if (!copy)
+    if ((entries == g_local_entries && g_local_incomplete) ||
+        (entries == g_remote_entries && g_remote_incomplete))
+        return 0;
+    copy = 0;
+    if (!reserve_entries(&copy, 1))
         return 0;
     for (i = 0; i < count; ++i) {
+        if ((i & 31) == 0 && !process_operation_events()) {
+            free_entries(copy);
+            return 0;
+        }
         if (!entry_is_real(&entries[i]))
             continue;
         if (selected_only && !entries[i].selected)
             continue;
+        if (!reserve_entries(&copy, n + 1)) {
+            free_entries(copy);
+            return 0;
+        }
         copy[n++] = entries[i];
     }
     if (out_count)
@@ -2639,6 +2812,9 @@ static int ftp_download_remote_entry_recursive(const char *name, UBYTE is_dir)
     int index;
     int ok = 1;
 
+    if (!process_operation_events())
+        return 0;
+
     if (!is_dir) {
         index = find_entry_index(g_remote_entries, g_remote_count, name);
         if (index < 0) {
@@ -2664,12 +2840,16 @@ static int ftp_download_remote_entry_recursive(const char *name, UBYTE is_dir)
         return 0;
     }
     for (i = 0; i < snap_count; ++i) {
+        if (!process_operation_events()) {
+            ok = 0;
+            break;
+        }
         if (!ftp_download_remote_entry_recursive(snap[i].name, snap[i].is_dir)) {
             ok = 0;
             break;
         }
     }
-    FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+    free_entries(snap);
     if (!ftp_cdup_dir())
         ok = 0;
     local_path_parent();
@@ -2686,6 +2866,9 @@ static int ftp_upload_local_entry_recursive(const char *name, UBYTE is_dir)
     int i;
     int index;
     int ok = 1;
+
+    if (!process_operation_events())
+        return 0;
 
     if (!is_dir) {
         index = find_entry_index(g_local_entries, g_local_count, name);
@@ -2712,12 +2895,16 @@ static int ftp_upload_local_entry_recursive(const char *name, UBYTE is_dir)
         return 0;
     }
     for (i = 0; i < snap_count; ++i) {
+        if (!process_operation_events()) {
+            ok = 0;
+            break;
+        }
         if (!ftp_upload_local_entry_recursive(snap[i].name, snap[i].is_dir)) {
             ok = 0;
             break;
         }
     }
-    FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+    free_entries(snap);
     local_path_parent();
     load_local_path();
     if (!ftp_cdup_dir())
@@ -2737,6 +2924,9 @@ static int local_delete_path_recursive(const char *path)
     int ok = 1;
     char child[PATH_BUF_SIZE + NAME_BUF_SIZE];
 
+    if (!process_operation_events())
+        return 0;
+
     lock = Lock((CONST_STRPTR)path, ACCESS_READ);
     if (!lock)
         return DeleteFile((CONST_STRPTR)path) ? 1 : 0;
@@ -2746,32 +2936,58 @@ static int local_delete_path_recursive(const char *path)
         set_status_draw("No memory");
         return 0;
     }
-    if (!Examine(lock, fib) || fib->fib_DirEntryType <= 0) {
+    if (!Examine(lock, fib)) {
+        FreeMem(fib, sizeof(*fib));
+        UnLock(lock);
+        set_status_draw("Cannot examine entry: delete stopped");
+        return 0;
+    }
+    if (fib->fib_DirEntryType <= 0) {
         FreeMem(fib, sizeof(*fib));
         UnLock(lock);
         return DeleteFile((CONST_STRPTR)path) ? 1 : 0;
     }
-    snap = (struct FtpEntry *)AllocMem(sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES, MEMF_PUBLIC | MEMF_CLEAR);
-    if (!snap) {
+    snap = 0;
+    if (!reserve_entries(&snap, 1)) {
         FreeMem(fib, sizeof(*fib));
         UnLock(lock);
         set_status_draw("No memory");
         return 0;
     }
-    while (snap_count < MAX_LOCAL_ENTRIES && ExNext(lock, fib)) {
+    while (ExNext(lock, fib)) {
+        if (!process_operation_events() || !reserve_entries(&snap, snap_count + 1)) {
+            free_entries(snap);
+            FreeMem(fib, sizeof(*fib));
+            UnLock(lock);
+            set_status_draw("No memory: delete stopped");
+            return 0;
+        }
         copy_limited(snap[snap_count].name, NAME_BUF_SIZE, (const char *)fib->fib_FileName);
         snap[snap_count].is_dir = fib->fib_DirEntryType > 0;
         ++snap_count;
+    }
+    if (IoErr() != ERROR_NO_MORE_ENTRIES) {
+        free_entries(snap);
+        FreeMem(fib, sizeof(*fib));
+        UnLock(lock);
+        set_status_draw("Directory read failed: delete stopped");
+        return 0;
     }
     FreeMem(fib, sizeof(*fib));
     UnLock(lock);
 
     for (i = 0; i < snap_count; ++i) {
-        build_child_path(child, sizeof(child), path, snap[i].name);
-        if (!local_delete_path_recursive(child))
+        if (!process_operation_events()) {
             ok = 0;
+            break;
+        }
+        build_child_path(child, sizeof(child), path, snap[i].name);
+        if (!local_delete_path_recursive(child)) {
+            ok = 0;
+            break;
+        }
     }
-    FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+    free_entries(snap);
     if (ok && !DeleteFile((CONST_STRPTR)path))
         ok = 0;
     return ok;
@@ -2784,6 +3000,9 @@ static int ftp_delete_remote_entry_recursive(const char *name, UBYTE is_dir)
     int i;
     int code;
     int ok = 1;
+
+    if (!process_operation_events())
+        return 0;
 
     if (!is_dir) {
         if (!ftp_command(g_sock_base, g_ctrl_fd, "DELE", name, &code)) {
@@ -2803,10 +3022,16 @@ static int ftp_delete_remote_entry_recursive(const char *name, UBYTE is_dir)
         return 0;
     }
     for (i = 0; i < snap_count; ++i) {
-        if (!ftp_delete_remote_entry_recursive(snap[i].name, snap[i].is_dir))
+        if (!process_operation_events()) {
             ok = 0;
+            break;
+        }
+        if (!ftp_delete_remote_entry_recursive(snap[i].name, snap[i].is_dir)) {
+            ok = 0;
+            break;
+        }
     }
-    FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+    free_entries(snap);
     if (!ftp_cdup_dir())
         ok = 0;
     if (!ftp_command(g_sock_base, g_ctrl_fd, "RMD", name, &code) || code < 200 || code >= 300)
@@ -2852,12 +3077,16 @@ static int ftp_download_selected(void)
         snap[0] = g_remote_entries[g_remote_sel];
     }
     for (i = 0; i < snap_count; ++i) {
+        if (!process_operation_events()) {
+            ok = 0;
+            break;
+        }
         if (!ftp_download_remote_entry_recursive(snap[i].name, snap[i].is_dir)) {
             ok = 0;
             break;
         }
     }
-    FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+    free_entries(snap);
     copy_limited(g_local_path, sizeof(g_local_path), start_local);
     copy_limited(g_remote_path, sizeof(g_remote_path), start_remote);
     load_local_path();
@@ -2903,12 +3132,16 @@ static int ftp_upload_selected(void)
         snap[0] = g_local_entries[g_local_sel];
     }
     for (i = 0; i < snap_count; ++i) {
+        if (!process_operation_events()) {
+            ok = 0;
+            break;
+        }
         if (!ftp_upload_local_entry_recursive(snap[i].name, snap[i].is_dir)) {
             ok = 0;
             break;
         }
     }
-    FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+    free_entries(snap);
     copy_limited(g_local_path, sizeof(g_local_path), start_local);
     copy_limited(g_remote_path, sizeof(g_remote_path), start_remote);
     load_local_path();
@@ -3145,9 +3378,7 @@ static int request_remote_dir_name(char *out, int out_len)
 
     while (running) {
         SetDrMd(win->RPort, JAM1);
-        SetAPen(win->RPort, 0);
-        RectFill(win->RPort, 0, 10, (WORD)(win->Width - 1), (WORD)(win->Height - 1));
-        SetAPen(win->RPort, 1);
+        dialog_clear_interior(win);
         dialog_text(win, 16, 27, "Directory name:");
         Move(win->RPort, 16, 36);
         Draw(win->RPort, 276, 36);
@@ -3683,18 +3914,24 @@ static int local_delete_selected(void)
     }
 
     if (!confirm_delete_dialog("Local selection:", "Recursive delete selected items")) {
-        FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+        free_entries(snap);
         set_status_draw("Delete cancelled");
         return 0;
     }
 
     set_status_draw("Deleting...");
     for (i = 0; i < snap_count; ++i) {
-        build_local_full_path(path, sizeof(path), snap[i].name);
-        if (!local_delete_path_recursive(path))
+        if (!process_operation_events()) {
             ok = 0;
+            break;
+        }
+        build_local_full_path(path, sizeof(path), snap[i].name);
+        if (!local_delete_path_recursive(path)) {
+            ok = 0;
+            break;
+        }
     }
-    FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+    free_entries(snap);
     load_local_path();
     set_status_draw(ok ? "Delete complete" : "Delete incomplete");
     return ok;
@@ -3738,7 +3975,7 @@ static int ftp_delete_selected(void)
     }
 
     if (!confirm_delete_dialog("FTP selection:", "Recursive delete selected items")) {
-        FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+        free_entries(snap);
         set_status_draw("Delete cancelled");
         return 0;
     }
@@ -3746,10 +3983,16 @@ static int ftp_delete_selected(void)
     copy_limited(start_remote, sizeof(start_remote), g_remote_path);
     set_status_draw("Deleting...");
     for (i = 0; i < snap_count; ++i) {
-        if (!ftp_delete_remote_entry_recursive(snap[i].name, snap[i].is_dir))
+        if (!process_operation_events()) {
             ok = 0;
+            break;
+        }
+        if (!ftp_delete_remote_entry_recursive(snap[i].name, snap[i].is_dir)) {
+            ok = 0;
+            break;
+        }
     }
-    FreeMem(snap, sizeof(struct FtpEntry) * MAX_LOCAL_ENTRIES);
+    free_entries(snap);
     copy_limited(g_remote_path, sizeof(g_remote_path), start_remote);
     ftp_list_remote();
     set_status_draw(ok ? "Delete complete" : "Delete incomplete");
@@ -3879,7 +4122,9 @@ static int local_enter_selected(void)
 
 static void handle_button_action(UWORD gid)
 {
-    if (gid == GID_BTN_CONNECT) {
+    if (gid == GID_BTN_DISCONNECT) {
+        ftp_gui_disconnect_session("Disconnected");
+    } else if (gid == GID_BTN_CONNECT) {
         ftp_connect_login();
     } else if (gid == GID_BTN_SAVE) {
         if (!g_host[0]) {
@@ -3903,7 +4148,7 @@ static void handle_button_action(UWORD gid)
 
 static int is_button_gadget_id(UWORD gid)
 {
-    return gid >= GID_BTN_CONNECT && gid <= GID_BTN_SAVE;
+    return gid >= GID_BTN_CONNECT && gid <= GID_BTN_DISCONNECT;
 }
 
 static void handle_mouse_down(WORD mx, WORD my)
@@ -3996,14 +4241,68 @@ static void handle_password_key(UWORD code)
     draw_password_field();
 }
 
+static int process_operation_events(void)
+{
+    struct IntuiMessage *msg;
+    if (!g_win)
+        return !g_cancel_requested;
+    while ((msg = (struct IntuiMessage *)GetMsg(g_win->UserPort))) {
+        ULONG cls = msg->Class;
+        UWORD code = msg->Code;
+        UWORD gid = 0;
+        if (cls == IDCMP_GADGETUP && msg->IAddress)
+            gid = ((struct Gadget *)msg->IAddress)->GadgetID;
+        ReplyMsg((struct Message *)msg);
+        if (cls == IDCMP_CLOSEWINDOW) {
+            g_close_requested = 1;
+            g_cancel_requested = 1;
+        } else if (cls == IDCMP_GADGETUP && gid == GID_BTN_DISCONNECT) {
+            g_cancel_requested = 1;
+        } else if (cls == IDCMP_REFRESHWINDOW) {
+            BeginRefresh(g_win);
+            draw_ui();
+            EndRefresh(g_win, TRUE);
+        } else if (cls == IDCMP_NEWSIZE) {
+            draw_ui();
+        } else if (cls == IDCMP_MENUPICK) {
+            while (code != MENUNULL) {
+                struct MenuItem *item = ItemAddress(&g_menu_project, code);
+                code = item ? item->NextSelect : MENUNULL;
+                if (item == &g_menu_back)
+                    WindowToBack(g_win);
+            }
+        }
+    }
+    return !g_cancel_requested;
+}
+
+static void finish_operation(void)
+{
+    if (g_cancel_requested) {
+        ftp_gui_disconnect_session("Cancelled");
+        g_transfer_busy = 0;
+    }
+}
+
+static void operation_fields(int enabled)
+{
+    struct Gadget *fields[] = { &g_host_gad, &g_port_gad, &g_user_gad, &g_path_gad };
+    int i;
+    if (g_fields_disabled == !enabled)
+        return;
+    g_fields_disabled = !enabled;
+    for (i = 0; i < 4; ++i) {
+        if (enabled)
+            OnGadget(fields[i], g_win, 0);
+        else
+            OffGadget(fields[i], g_win, 0);
+    }
+}
+
 static void close_network(void)
 {
     ftp_close_data();
-    if (g_sock_base && g_ctrl_fd >= 0) {
-        int ignored;
-        ftp_command(g_sock_base, g_ctrl_fd, "QUIT", 0, &ignored);
-        ftp_close_control();
-    }
+    ftp_close_control();
     clear_remote_session_state();
     if (g_sock_base) {
         CloseLibrary(g_sock_base);
@@ -4106,6 +4405,9 @@ int main(int argc, char **argv)
     g_sock_base = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 1);
     if (!g_sock_base) {
         gui_puts("bsdsocket.library open failed\n");
+        free_entries(g_local_entries);
+        g_local_entries = 0;
+        g_local_count = 0;
         set_status("bsdsocket.library open failed");
         draw_ui();
         CloseWindow(g_win);
@@ -4115,14 +4417,17 @@ int main(int argc, char **argv)
     }
 
     if (autoconnect) {
+        operation_fields(0);
         if (g_host[0] && g_user[0])
             ftp_connect_login();
         else
             set_status_draw("Autoconnect needs HOST and USER");
+        finish_operation();
+        operation_fields(1);
     }
 
     ftp_debug_puts("GUI START phase=event-loop\n");
-    while (running) {
+    while (running && !g_close_requested) {
         Wait(1UL << g_win->UserPort->mp_SigBit);
         while ((msg = (struct IntuiMessage *)GetMsg(g_win->UserPort))) {
             UWORD gadget_id = 0;
@@ -4133,6 +4438,12 @@ int main(int argc, char **argv)
             if (cls == IDCMP_GADGETUP && msg->IAddress)
                 gadget_id = ((struct Gadget *)msg->IAddress)->GadgetID;
             ReplyMsg((struct Message *)msg);
+            g_cancel_requested = 0;
+            if ((cls == IDCMP_GADGETUP && is_button_gadget_id(gadget_id)) ||
+                (cls == IDCMP_MOUSEBUTTONS && code == SELECTUP &&
+                 (in_rect(mx, my, LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H) ||
+                  in_rect(mx, my, REMOTE_X, REMOTE_Y, REMOTE_W, REMOTE_H))))
+                operation_fields(0);
             if (cls == IDCMP_CLOSEWINDOW) {
                 running = 0;
             } else if (cls == IDCMP_NEWSIZE) {
@@ -4160,6 +4471,8 @@ int main(int argc, char **argv)
                         show_info_dialog();
                     else if (item == &g_menu_address_open)
                         show_address_book_dialog();
+                    else if (item == &g_menu_back)
+                        WindowToBack(g_win);
                     code = next_code;
                 }
             } else if (cls == IDCMP_GADGETUP) {
@@ -4168,10 +4481,16 @@ int main(int argc, char **argv)
                 else
                     draw_ui();
             }
+            finish_operation();
+            operation_fields(1);
+            if (g_close_requested)
+                break;
         }
     }
 
     close_network();
+    free_entries(g_local_entries);
+    free_entries(g_remote_entries);
     ClearMenuStrip(g_win);
     CloseWindow(g_win);
     CloseLibrary((struct Library *)GfxBase);
