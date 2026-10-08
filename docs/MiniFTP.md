@@ -7,10 +7,10 @@ GUI application and uses `bsdsocket.library` only; it does not call internal
 Version identity:
 
 ```text
-MiniFTP v1.4 by Marcel Jaehne (c)2026
+MiniFTP v1.5 by Marcel Jaehne (c)2026
 ```
 
-The window title is shortened to `MiniFTP v1.4`; the full author/version text is shown in the `Info` dialog.
+The window title is shortened to `MiniFTP v1.5`; the full author/version text is shown in the `Info` dialog.
 
 ## Shell Usage
 
@@ -35,10 +35,13 @@ The window contains:
 - framed connection fields for host, port, user, and password
 - password input is masked on screen
 - `Connect` and `Disconnect` buttons
-- a local path field and `Load` button
+- a local path field and `Open` button for mounted-drive selection
 - a left pane with local files and directories
 - a right pane with FTP server files
 - independent vertical scrollbars for both file panes
+- a horizontal scrollbar below the FTP pane: click the arrows or drag along
+  the track to reveal long file names and the remote path; scrolling changes
+  only the display, not the names used for transfers
 - local and remote directories are marked with `[DIR]`
 - a `..` parent entry is always shown at the top of both file panes
 - center transfer buttons:
@@ -95,7 +98,10 @@ Open `Address Book -> Open` to manage saved FTP connections. Each entry contains
 ## Workflow
 
 1. Enter host, optional port, user, and password. Empty Port uses FTP port 21. Decimal ports from 1 through 65535 are accepted.
-2. Enter a local path, such as `RAM:` or `Work:Download`, then click `Load`.
+2. Click `Open` and click a mounted drive to load its root into the local pane.
+   The picker shows device and volume names, with `Up`/`Down` for longer lists.
+   Close it or choose `Cancel` to keep the current path. Alternatively, enter a
+   local path such as `RAM:` or `Work:Download` and press Enter.
 3. Click `Connect`.
 4. The client logs in, sends `TYPE I`, and loads the remote directory with
    PASV `LIST`.
@@ -133,13 +139,86 @@ The GUI supports:
 PASV mode is the only supported transfer mode. Directory navigation reuses the
 existing control connection: `CWD` and `CDUP` do not reconnect or log in again.
 Each remote list refresh opens one temporary PASV data socket and closes it
-before reading the final `226`/`250` transfer reply. Uploads send conservative 128-byte file chunks, issue `TYPE I` immediately before
-`STOR`, wait briefly for the data socket to become writable after the final file
-block before closing it, compare server `SIZE` with the local byte count when
-the server supports `SIZE`, and then read the uploaded file back with `RETR` for
-a byte-for-byte verification pass. This avoids closing a nonblocking stack while
-the last accepted bytes are still being flushed and catches truncated or
-corrupted uploads.
+before reading the final `226`/`250` transfer reply. Uploads issue `TYPE I`
+immediately before `STOR` and retain the existing post-send drain handling.
+Uploads are checked by the FTP completion reply and server `SIZE` when
+available. The file is not downloaded again for verification. A size check
+cannot detect content corruption that leaves the file size unchanged. If SIZE
+is unavailable, the final status explicitly reports the missing size check.
+
+## Transfer performance settings
+
+The `Transfer` menu offers these session-only settings:
+
+- `Upload block: 128/512/1024/2048 bytes`: select the maximum payload per send
+  call. The provisional default is 512 bytes; 128 remains available for
+  compatibility comparisons. Calls are capped at the compiled IPC payload
+  limit. Hardware measurements are required before choosing a tuned default.
+- `Last transfer timings`: show cumulative milliseconds for data transfer,
+  size checking, and directory listing since the last upload/download batch.
+  Data timing includes file I/O, data-connection setup and final replies;
+  size checking measures SIZE requests; lists include local scans
+  and remote LISTs. Other directory commands and user pauses are not included,
+  so these numbers are not the full batch wall-clock duration.
+
+File reads/writes use an 8 KB buffer, falling back to 4 KB, 2 KB, then a static
+2 KB buffer if allocations fail. Buffers are released on every success, error, and cancellation path. Downloads flush their remaining
+buffer, check every write, close the file, and validate the FTP completion reply
+and available size information before reporting success. The return value of
+`Close()` is not interpreted because it is undefined before dos.library V36. On cancellation, buffered
+but unwritten data is discarded; a partial destination file may remain.
+Network receive requests remain at 2 KB, matching the inspected TheWire13 IPC
+payload limit.
+
+Uploads try nonblocking send first and wait only after backpressure or retryable
+errors. Successful partial sends advance by the number of bytes actually
+accepted. Progress is redrawn at most every 250 ms, separately from cancellation
+checks. Upload-end handling is intentionally retained for TheWire13 testing.
+
+Batch transfers use snapshots rather than reloading directories after each
+file. Recursive uploads scan each entered local directory; recursive downloads
+list each entered remote directory. The visible lists are refreshed at the end,
+including recovery after errors and cancellation.
+
+## Performance benchmark procedure
+
+Create deterministic test data on the host (not on the Amiga):
+
+```sh
+python3 tools/transfer_fixture.py create /tmp/miniftp-bench --large-kib 1024
+```
+
+The `data` directory contains a large file, 200 small files, an empty file, and
+nested files with sizes that do not align to transfer buffers. Use a smaller
+`--large-kib` value when testing an Amiga with limited RAM.
+
+A comparison binary from commit `276c7c8` has been built as
+`build/MiniFTP-baseline-276c7c8`; the optimized build is `build/MiniFTP`.
+The baseline also predates the uncommitted scrolling/name fixes, so transfer
+comparisons should use short file names supported by both builds.
+
+Compare the previous build with the new build on the same Amiga, network stack,
+FTP server and storage. First measure the large file alone, then `small`, then
+`nested`; use `RAM:` and the hard disk separately. For uploads, compare all four
+block sizes. The baseline performs a full read-back while the current build
+checks size only; record that difference when comparing total elapsed times. Repeat
+runs and record full elapsed time plus `Transfer -> Last transfer timings`.
+
+| Build | Direction | Dataset | Storage | Block | Verification | Wall time | Data ms | Size/check ms | Lists ms | Hash check |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Previous / new | Upload / download | Large / small / nested | RAM / disk | 128–2048 | Full / size | Pending | Pending | Pending | Pending | Pending |
+
+After a complete round trip of the `data` tree, verify its contents on the host:
+
+```sh
+python3 tools/transfer_fixture.py verify /tmp/miniftp-bench /path/to/returned/data
+```
+
+Also test Disconnect during transfer, server stalls, a full
+local disk, low RAM and repeated reconnects. Host tests cover buffer fallback,
+partial reads/writes/sends, cleanup, size mismatches, empty files,
+unsupported SIZE, nested traversal and reduced directory refreshes. They do not
+measure real Amiga/network throughput. No hardware speedup has yet been measured.
 
 ## Limitations
 
@@ -290,6 +369,62 @@ mini_ftp 192.168.7.1 anonymous test@example.com put ram:test.txt
 
 ## Changelog
 
+### 1.5
+
+Added:
+
+- An Open button replacing Load, with a mounted-drive picker for the local
+  pane. Select a drive to open its root directory; device and volume names are
+  shown together. The picker supports paging, Cancel, Escape and window close.
+- Independent horizontal scrollbars with arrows and draggable sliders for both
+  file panes. FTP scrolling also reveals long remote paths.
+- A Transfer menu with selectable upload blocks of 128, 512, 1024 or 2048 bytes
+  and separate timings for data transfer, size checks and directory listing.
+- Reproducible benchmark files with SHA-256 validation, plus regression tests
+  for buffered transfers, recursive batches, drive enumeration and long names.
+- A `make test` target running all five host-side test suites.
+
+Changed:
+
+- Upload and download file I/O uses an 8 KB buffer, with 4 KB and 2 KB allocation
+  fallbacks and a static 2 KB fallback for low-memory conditions.
+- Uploads try nonblocking sends before waiting for socket capacity. Partial
+  sends are handled correctly; the provisional default upload block is 512 bytes.
+- Removed the extra upload download-and-compare pass. FTP completion replies
+  and server SIZE checks remain; unavailable SIZE checks are reported explicitly.
+- Batch transfers refresh visible directories at completion instead of after
+  every file. Recursive operations retain the scans needed for traversal.
+- Progress redraws are limited to one every 250 ms, independently of abort
+  handling. Scrolling redraws only the affected pane and related scrollbar/path.
+- FTP file names up to 255 bytes are preserved. Directory path buffers now hold
+  up to 511 bytes, with larger FTP command, listing and address-book buffers.
+- Enter in the local path field opens a manually entered directory.
+- Loading an FTP directory displays `Listing Directory...` during data
+  connection setup as well as listing reception.
+
+Fixed:
+
+- Removed the invalid check of the pre-V36 `Close()` return value that caused
+  false `Local file close failed` errors and disconnections on AmigaOS 1.3.
+  Buffered writes, FTP completion replies and available size checks remain.
+- Long FTP names are no longer silently truncated to 63 bytes. Unsupported
+  names, oversized listing lines and paths are rejected or reported explicitly.
+- Downloads use the exact remote file name instead of interpreting it as a
+  local path and retaining only its suffix.
+- Scrollbar movement no longer refreshes the entire MiniFTP window.
+- Transfer cleanup preserves error messages, releases buffers and snapshots,
+  and restores the local directory after failures or cancellation.
+
+Validation and limitations:
+
+- The Amiga cross-build completes without compiler warnings. All five host
+  test suites pass, including memory/error handling and OS 1.3 Close behavior.
+- The new drive picker and optimized transfers still require runtime acceptance
+  on AmigaOS 1.3. No real-hardware throughput improvement has yet been measured.
+- Name and path limits are measured in bytes; local filesystem limits still
+  apply. Size checks cannot detect content corruption at the same file size.
+- Existing DNS cancellation limitations depend on the installed network stack.
+
 ### 1.4
 
 Added:
@@ -374,7 +509,7 @@ until runtime acceptance on AmigaOS 1.3.
   preserve existing allocations, report incomplete lists, and stop operations
   that require a complete directory. Allocation sizes are tracked separately
   from entry counts so snapshots can always be freed correctly.
-- Disconnect cancels socket waits, streaming transfers, verification, and
+- Disconnect cancels socket waits, streaming transfers, size checks, and
   recursive operations. Cleanup closes sockets without waiting for a server
   response. Closing the main window during an operation requests cancellation
   before exiting. Partial local/remote files may remain; no rollback is made.
@@ -401,7 +536,7 @@ Runtime acceptance still required:
    return to it, and verify typing in every connection/path field.
 2. List and recursively transfer/delete directories containing more than 128
    entries, including nested directories; compare results with the source.
-3. Disconnect during connect, DNS, LIST, upload, download, verification, and
+3. Disconnect during connect, DNS, LIST, upload, download, size checks, and
    recursive operations; repeat with a stalled server and reconnect afterward.
 4. Close the main window during an operation and check that it exits cleanly.
 5. Repeat large-list operations with limited RAM and verify memory recovery.

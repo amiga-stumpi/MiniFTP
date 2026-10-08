@@ -25,10 +25,15 @@ prefix = r'''
 #include <stdio.h>
 #include <string.h>
 typedef uint32_t ULONG;
+typedef int32_t LONG;
 typedef unsigned char UBYTE;
 #define MEMF_PUBLIC 1
 #define MEMF_CLEAR 2
-#define NAME_BUF_SIZE 64
+#define NAME_BUF_SIZE 256
+#define PATH_BUF_SIZE 512
+#define CMD_BUF_SIZE 1024
+static char g_cmd[CMD_BUF_SIZE];
+static int g_remote_count;
 #define TIMEOUT_SECONDS 20
 #define AMITCP13_EINTR 4
 struct FtpEntry { char name[NAME_BUF_SIZE]; UBYTE is_dir, selected; };
@@ -72,13 +77,21 @@ static int call_waitselect(struct Library *base, int nfds, void *r, void *w, voi
 static int call_errno(struct Library *base) { (void)base; return wait_errno; }
 static char status[128];
 static void set_status_draw(const char *s) { snprintf(status, sizeof(status), "%s", s); }
+static void set_status(const char *s) { set_status_draw(s); }
 static void set_status_errno(const char *s, int err) { (void)err; set_status_draw(s); }
 static void draw_status_now(void) {}
 '''
+# Keep the harness tied to the production buffer sizes.
+import re
+for macro in ('NAME_BUF_SIZE', 'PATH_BUF_SIZE', 'CMD_BUF_SIZE'):
+    value = re.search(r'^#define ' + macro + r' (\d+)$', source, re.M).group(1)
+    prefix = re.sub(r'(#define ' + macro + r') \d+', lambda m: m.group(1) + ' ' + value, prefix)
+
 helpers = '\n'.join(function(n) for n in [
     'free_entries', 'reserve_entries', 'upper_ascii', 'text_equal',
     'text_compare_ci', 'ftp_entry_before', 'sort_entries', 'entry_is_real',
-    'snapshot_entries', 'wait_for_socket'])
+    'snapshot_entries', 'wait_for_socket', 'text_len', 'copy_limited',
+    'append_text', 'add_remote_line', 'build_command1', 'path_can_enter'])
 main = r'''
 int main(void) {
     struct FtpEntry *copy = NULL, *old;
@@ -125,6 +138,29 @@ int main(void) {
     assert(!reserve_entries(&g_local_entries, -1));
     assert(!reserve_entries(&g_local_entries, 0x7fffffff));
     free_entries(NULL);
+    {
+        char name[NAME_BUF_SIZE + 1], listing[512];
+        memset(name, 'x', NAME_BUF_SIZE - 1);
+        name[10] = ' ';
+        name[NAME_BUF_SIZE - 1] = 0;
+        largest_allocation = (size_t)-1;
+        snprintf(listing, sizeof(listing), "-rw-r--r-- 1 owner group 42 Jan 01 12:00 %s", name);
+        add_remote_line(listing);
+        assert(g_remote_count == 1 && !g_remote_incomplete);
+        assert(strcmp(g_remote_entries[0].name, name) == 0);
+        assert(build_command1("RETR", g_remote_entries[0].name) == 262);
+        assert(memcmp(g_cmd + 5, name, 255) == 0);
+        assert(strcmp(g_cmd + 260, "\r\n") == 0);
+        assert(path_can_enter("RAM:", name));
+        name[255] = 'x'; name[256] = 0;
+        snprintf(listing, sizeof(listing), "-rw-r--r-- 1 owner group 42 Jan 01 12:00 %s", name);
+        add_remote_line(listing);
+        assert(g_remote_count == 1 && g_remote_incomplete == 2);
+        free_entries(g_remote_entries); g_remote_entries = NULL;
+        assert(allocations == 0);
+        memset(listing, 'x', 511); listing[511] = 0;
+        assert(!path_can_enter(listing, "child"));
+    }
     wait_result = 0; cancel_at = 3;
     assert(!wait_for_socket(NULL, 2, 0));
     assert(wait_calls == 3 && cancel);
@@ -139,7 +175,7 @@ int main(void) {
     wait_errno = AMITCP13_EINTR; cancel_at = wait_calls + 2;
     assert(!wait_for_socket(NULL, 2, 0) && cancel);
     assert(allocations == 0);
-    puts("PASS: large lists, sorting, snapshots, allocation failures, cancellation and socket waits");
+    puts("PASS: lists, snapshots, memory failures, long filenames, path limits, cancellation and socket waits");
     return 0;
 }
 '''

@@ -23,4 +23,11 @@ build/MiniFTP: build $(OBJS)
 clean:
 	rm -f $(OBJS) build/MiniFTP
 
-.PHONY: all clean
+test:
+	python3 tests/test_core.py
+	python3 tests/test_layout.py
+	python3 tests/test_transfers.py
+	python3 tests/test_batches.py
+	python3 tests/test_drives.py
+
+.PHONY: all clean test

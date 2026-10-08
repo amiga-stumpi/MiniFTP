@@ -6,6 +6,7 @@
 #include <graphics/gfx.h>
 #include <graphics/rastport.h>
 #include <dos/dos.h>
+#include <dos/dosextens.h>
 #include <workbench/startup.h>
 #include <workbench/workbench.h>
 #include <workbench/icon.h>
@@ -19,32 +20,29 @@
 #include "amitcp13/bsdsocket.h"
 #include "amitcp13/stack_ipc.h"
 
-#define MINI_FTP_VERSION "v1.4"
+#define MINI_FTP_VERSION "v1.5"
 #define MINI_FTP_GUI_TITLE "MiniFTP " MINI_FTP_VERSION
 #define MINI_FTP_FULL_ID "MiniFTP " MINI_FTP_VERSION " by Marcel Jaehne (c)2026"
 #define FTP_PORT 21
 #define TIMEOUT_SECONDS 20
-#define LINE_BUF_SIZE 512
+#define LINE_BUF_SIZE 1024
 #ifndef AMITCP13_SOCKET_RECV_CHUNK
 #define AMITCP13_SOCKET_RECV_CHUNK 2048
 #endif
 #define DATA_BUF_SIZE AMITCP13_SOCKET_RECV_CHUNK
-#define CMD_BUF_SIZE 512
+#define CMD_BUF_SIZE 1024
 #define HOST_BUF_SIZE 96
 #define PORT_BUF_SIZE 8
 #define USER_BUF_SIZE 48
 #define PASS_BUF_SIZE 48
-#define PATH_BUF_SIZE 160
-#define NAME_BUF_SIZE 64
+#define PATH_BUF_SIZE 512
+#define NAME_BUF_SIZE 256
 #define MAX_ADDRESS_ENTRIES 32
 #define ADDRESS_NAME_SIZE 40
 #define ADDRESS_BOOK_FILE "MiniFTP.addressbook"
-#define PROGRESS_STEP_BYTES 32768L
 #define UPLOAD_RETRY_LIMIT 64
 #define CONTROL_SEND_RETRY_LIMIT 64
 #define UPLOAD_DRAIN_POLLS 20
-#define UPLOAD_CHUNK_SIZE 128
-#define VERIFY_CHUNK_SIZE 512
 #define BSD_EAGAIN_COMPAT 35
 
 #ifndef MINI_FTP_DEBUG
@@ -61,7 +59,7 @@
 #define GID_PORT 4
 #define GID_PATH 5
 #define GID_BTN_CONNECT 20
-#define GID_BTN_LOAD 21
+#define GID_BTN_OPEN 21
 #define GID_BTN_UPLOAD 22
 #define GID_BTN_DOWNLOAD 23
 #define GID_BTN_DELETE 24
@@ -75,10 +73,13 @@
 #define SCROLL_NONE 0
 #define SCROLL_LOCAL 1
 #define SCROLL_REMOTE 2
+#define SCROLL_REMOTE_HORIZONTAL 3
+#define SCROLL_LOCAL_HORIZONTAL 4
+#define HSCROLL_H 12
 
 #define BUTTON_NONE 0
 #define BUTTON_CONNECT 1
-#define BUTTON_LOAD 2
+#define BUTTON_OPEN 2
 #define BUTTON_UPLOAD 3
 #define BUTTON_DOWNLOAD 4
 #define BUTTON_DELETE 5
@@ -120,7 +121,6 @@ static int g_connected;
 static char g_line[LINE_BUF_SIZE];
 static char g_cmd[CMD_BUF_SIZE];
 static UBYTE g_data_buf[DATA_BUF_SIZE];
-static UBYTE g_verify_buf[VERIFY_CHUNK_SIZE];
 static char g_host[HOST_BUF_SIZE] = "";
 static char g_port[PORT_BUF_SIZE] = "";
 static char g_user[USER_BUF_SIZE] = "anonymous";
@@ -141,7 +141,11 @@ static int g_remote_count;
 static int g_local_sel = -1;
 static int g_remote_sel = -1;
 static int g_local_top;
+static int g_local_left;
+static int g_local_left_max;
 static int g_remote_top;
+static int g_remote_left;
+static int g_remote_left_max;
 static int g_scroll_drag;
 static int g_pressed_button;
 static int g_active_pane = ACTIVE_PANE_REMOTE;
@@ -173,10 +177,10 @@ static WORD BTN_SAVE_X = 319;
 static WORD BTN_SAVE_Y = 48;
 static WORD BTN_SAVE_W = 48;
 static WORD BTN_SAVE_H = 14;
-static WORD BTN_LOAD_X = 520;
-static WORD BTN_LOAD_Y = 15;
-static WORD BTN_LOAD_W = 42;
-static WORD BTN_LOAD_H = 14;
+static WORD BTN_OPEN_X = 520;
+static WORD BTN_OPEN_Y = 15;
+static WORD BTN_OPEN_W = 42;
+static WORD BTN_OPEN_H = 14;
 static WORD BTN_UPLOAD_X = 300;
 static WORD BTN_UPLOAD_Y = 94;
 static WORD BTN_UPLOAD_W = 38;
@@ -260,6 +264,7 @@ static void clear_rect(WORD x, WORD y, WORD w, WORD h);
 static void draw_password_field(void);
 static void show_info_dialog(void);
 static void show_address_book_dialog(void);
+static void init_string_info(struct StringInfo *si);
 static void ftp_make_directory_action(void);
 
 static struct StringInfo g_host_si = { (STRPTR)g_host, (STRPTR)g_host_undo, 0, HOST_BUF_SIZE, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -292,9 +297,9 @@ static struct Gadget g_save_gad = {
     0, 319, 48, 48, 14, GFLG_GADGHCOMP, GACT_RELVERIFY,
     GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_SAVE, 0
 };
-static struct Gadget g_load_gad = {
+static struct Gadget g_open_gad = {
     0, 520, 16, 42, 14, GFLG_GADGHCOMP, GACT_RELVERIFY,
-    GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_LOAD, 0
+    GTYP_BOOLGADGET, 0, 0, 0, 0, 0, GID_BTN_OPEN, 0
 };
 static struct Gadget g_disconnect_gad = {
     0, 376, 48, 88, 14, GFLG_GADGHCOMP, GACT_RELVERIFY,
@@ -322,14 +327,25 @@ static struct IntuiText g_menu_info_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Info
 static struct MenuItem g_menu_info = { &g_menu_back, 0, 0, 112, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_info_text, 0, 0, 0, 0 };
 static struct IntuiText g_menu_address_open_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Open", 0 };
 static struct MenuItem g_menu_address_open = { 0, 0, 0, 48, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_address_open_text, 0, 0, 0, 0 };
-static struct Menu g_menu_address = { 0, 70, 0, 98, 10, MENUENABLED, (UBYTE *)"Address Book", &g_menu_address_open, 0, 0, 0, 0 };
+static struct IntuiText g_menu_timings_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Last transfer timings", 0 };
+static struct MenuItem g_menu_timings = { 0, 0, 40, 224, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_timings_text, 0, 0, 0, 0 };
+static struct IntuiText g_menu_block2048_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Upload block: 2048 bytes", 0 };
+static struct MenuItem g_menu_block2048 = { &g_menu_timings, 0, 30, 224, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_block2048_text, 0, 0, 0, 0 };
+static struct IntuiText g_menu_block1024_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Upload block: 1024 bytes", 0 };
+static struct MenuItem g_menu_block1024 = { &g_menu_block2048, 0, 20, 224, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_block1024_text, 0, 0, 0, 0 };
+static struct IntuiText g_menu_block512_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Upload block: 512 bytes", 0 };
+static struct MenuItem g_menu_block512 = { &g_menu_block1024, 0, 10, 224, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_block512_text, 0, 0, 0, 0 };
+static struct IntuiText g_menu_block128_text = { 0, 1, JAM1, 0, 1, 0, (UBYTE *)"Upload block: 128 bytes", 0 };
+static struct MenuItem g_menu_block128 = { &g_menu_block512, 0, 0, 224, 10, ITEMTEXT | ITEMENABLED | HIGHBOX, 0, (APTR)&g_menu_block128_text, 0, 0, 0, 0 };
+static struct Menu g_menu_transfer = { 0, 180, 0, 70, 10, MENUENABLED, (UBYTE *)"Transfer", &g_menu_block128, 0, 0, 0, 0 };
+static struct Menu g_menu_address = { &g_menu_transfer, 70, 0, 98, 10, MENUENABLED, (UBYTE *)"Address Book", &g_menu_address_open, 0, 0, 0, 0 };
 static struct Menu g_menu_project = { &g_menu_address, 0, 0, 62, 10, MENUENABLED, (UBYTE *)"Project", &g_menu_info, 0, 0, 0, 0 };
 
 static struct NewWindow g_new_window = {
     0, 0, 639, 200,
     0, 1,
     IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | IDCMP_NEWSIZE | IDCMP_MOUSEBUTTONS | IDCMP_MOUSEMOVE | IDCMP_GADGETUP | IDCMP_VANILLAKEY | IDCMP_MENUPICK,
-    WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SIZEGADGET | WFLG_SIZEBRIGHT | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE | WFLG_SMART_REFRESH,
+    WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_SIZEGADGET | WFLG_SIZEBRIGHT | WFLG_SIZEBBOTTOM | WFLG_REPORTMOUSE | WFLG_ACTIVATE | WFLG_SMART_REFRESH,
     0,
     0,
     (STRPTR)MINI_FTP_GUI_TITLE,
@@ -416,13 +432,13 @@ static void update_layout(void)
     if (load_x < 410)
         load_x = 410;
     path_x = 360;
-    BTN_LOAD_X = load_x;
-    BTN_LOAD_Y = 15;
-    BTN_LOAD_W = 42;
-    BTN_LOAD_H = 14;
+    BTN_OPEN_X = load_x;
+    BTN_OPEN_Y = 15;
+    BTN_OPEN_W = 42;
+    BTN_OPEN_H = 14;
     g_path_gad.LeftEdge = path_x;
     g_path_gad.TopEdge = 16;
-    g_path_gad.Width = (WORD)(BTN_LOAD_X - path_x - 10);
+    g_path_gad.Width = (WORD)(BTN_OPEN_X - path_x - 10);
     if (g_path_gad.Width < 80)
         g_path_gad.Width = 80;
     g_path_gad.Height = 12;
@@ -444,7 +460,7 @@ static void update_layout(void)
     if (REMOTE_W < 120)
         REMOTE_W = 120;
     REMOTE_Y = list_top;
-    LOCAL_H = (WORD)(STATUS_Y - LOCAL_Y - 8);
+    LOCAL_H = (WORD)(STATUS_Y - LOCAL_Y - 8 - HSCROLL_H);
     if (LOCAL_H < (MIN_LIST_ROWS * ROW_H + 4))
         LOCAL_H = (WORD)(MIN_LIST_ROWS * ROW_H + 4);
     REMOTE_H = LOCAL_H;
@@ -476,10 +492,10 @@ static void update_layout(void)
     g_save_gad.TopEdge = BTN_SAVE_Y;
     g_save_gad.Width = BTN_SAVE_W;
     g_save_gad.Height = BTN_SAVE_H;
-    g_load_gad.LeftEdge = BTN_LOAD_X;
-    g_load_gad.TopEdge = BTN_LOAD_Y;
-    g_load_gad.Width = BTN_LOAD_W;
-    g_load_gad.Height = BTN_LOAD_H;
+    g_open_gad.LeftEdge = BTN_OPEN_X;
+    g_open_gad.TopEdge = BTN_OPEN_Y;
+    g_open_gad.Width = BTN_OPEN_W;
+    g_open_gad.Height = BTN_OPEN_H;
     g_upload_gad.LeftEdge = BTN_UPLOAD_X;
     g_upload_gad.TopEdge = BTN_UPLOAD_Y;
     g_upload_gad.Width = BTN_UPLOAD_W;
@@ -622,7 +638,7 @@ static int attach_string_gadgets(void)
     AddGadget(g_win, &g_connect_gad, (ULONG)-1);
     AddGadget(g_win, &g_save_gad, (ULONG)-1);
     AddGadget(g_win, &g_disconnect_gad, (ULONG)-1);
-    AddGadget(g_win, &g_load_gad, (ULONG)-1);
+    AddGadget(g_win, &g_open_gad, (ULONG)-1);
     AddGadget(g_win, &g_upload_gad, (ULONG)-1);
     AddGadget(g_win, &g_download_gad, (ULONG)-1);
     AddGadget(g_win, &g_dirplus_gad, (ULONG)-1);
@@ -1057,6 +1073,146 @@ static void draw_scrollbar(WORD x, WORD y, WORD h, int count, int top)
     RectFill(g_win->RPort, (WORD)(x + 2), thumb_y, (WORD)(x + SCROLL_W - 2), (WORD)(thumb_y + thumb_h));
 }
 
+static int horizontal_limit(const char *text, WORD width)
+{
+    int low = 0;
+    int len = (int)text_len(text);
+    int high = len;
+    if (width <= 0)
+        return len;
+    while (low < high) {
+        int middle = low + (high - low) / 2;
+        if (TextLength(g_win->RPort, (STRPTR)(text + middle), len - middle) > width)
+            low = middle + 1;
+        else
+            high = middle;
+    }
+    return low;
+}
+
+static void update_remote_horizontal(void)
+{
+    int i;
+    int limit;
+    char display[NAME_BUF_SIZE + 8];
+    WORD width = (WORD)(REMOTE_W - SCROLL_W - 7);
+    g_remote_left_max = horizontal_limit(g_remote_path,
+        (WORD)(g_win->Width - g_win->BorderRight - 291));
+    for (i = 0; i < g_remote_count; ++i) {
+        display[0] = 0;
+        if (g_remote_entries[i].is_dir && !text_equal(g_remote_entries[i].name, ".."))
+            append_text(display, sizeof(display), "[DIR] ");
+        append_text(display, sizeof(display), g_remote_entries[i].name);
+        limit = horizontal_limit(display, width);
+        if (limit > g_remote_left_max)
+            g_remote_left_max = limit;
+    }
+    if (g_remote_left > g_remote_left_max)
+        g_remote_left = g_remote_left_max;
+    if (g_remote_left < 0)
+        g_remote_left = 0;
+}
+
+static const char *remote_visible_text(const char *text, WORD width)
+{
+    int offset = g_remote_left;
+    int limit = horizontal_limit(text, width);
+    /* Shorter rows remain visible when scrolling a longer name or path. */
+    if (offset > limit)
+        offset = limit;
+    return text + offset;
+}
+
+static void draw_remote_horizontal(void)
+{
+    WORD y = (WORD)(REMOTE_Y + REMOTE_H + 2);
+    WORD track_x = (WORD)(REMOTE_X + HSCROLL_H + 2);
+    WORD track_w = (WORD)(REMOTE_W - 2 * HSCROLL_H - 4);
+    WORD thumb_x = track_x;
+    draw_button(REMOTE_X, y, HSCROLL_H, HSCROLL_H, "<");
+    draw_button((WORD)(REMOTE_X + REMOTE_W - HSCROLL_H), y, HSCROLL_H, HSCROLL_H, ">");
+    clear_rect((WORD)(track_x + 1), (WORD)(y + 1),
+               (WORD)(track_w - 2), (WORD)(HSCROLL_H - 2));
+    draw_box(track_x, y, track_w, HSCROLL_H);
+    if (g_remote_left_max)
+        thumb_x += (WORD)((g_remote_left * (track_w - 8)) / g_remote_left_max);
+    RectFill(g_win->RPort, (WORD)(thumb_x + 1), (WORD)(y + 2),
+             (WORD)(thumb_x + 7), (WORD)(y + HSCROLL_H - 2));
+}
+
+static void move_remote_horizontal(WORD mx)
+{
+    int track_x = REMOTE_X + HSCROLL_H + 2;
+    int track_w = REMOTE_W - 2 * HSCROLL_H - 12;
+    int rel = mx - track_x;
+    if (rel < 0)
+        rel = 0;
+    if (rel > track_w)
+        rel = track_w;
+    g_remote_left = track_w > 0 ? (rel * g_remote_left_max) / track_w : 0;
+}
+
+static void update_local_horizontal(void)
+{
+    int i;
+    int limit;
+    char display[NAME_BUF_SIZE + 8];
+    WORD width = (WORD)(LOCAL_W - SCROLL_W - 7);
+    g_local_left_max = 0;
+    for (i = 0; i < g_local_count; ++i) {
+        display[0] = 0;
+        if (g_local_entries[i].is_dir && !text_equal(g_local_entries[i].name, ".."))
+            append_text(display, sizeof(display), "[DIR] ");
+        append_text(display, sizeof(display), g_local_entries[i].name);
+        limit = horizontal_limit(display, width);
+        if (limit > g_local_left_max)
+            g_local_left_max = limit;
+    }
+    if (g_local_left > g_local_left_max)
+        g_local_left = g_local_left_max;
+    if (g_local_left < 0)
+        g_local_left = 0;
+}
+
+static const char *local_visible_text(const char *text, WORD width)
+{
+    int offset = g_local_left;
+    int limit = horizontal_limit(text, width);
+    /* Shorter rows remain visible when scrolling a longer name or path. */
+    if (offset > limit)
+        offset = limit;
+    return text + offset;
+}
+
+static void draw_local_horizontal(void)
+{
+    WORD y = (WORD)(LOCAL_Y + LOCAL_H + 2);
+    WORD track_x = (WORD)(LOCAL_X + HSCROLL_H + 2);
+    WORD track_w = (WORD)(LOCAL_W - 2 * HSCROLL_H - 4);
+    WORD thumb_x = track_x;
+    draw_button(LOCAL_X, y, HSCROLL_H, HSCROLL_H, "<");
+    draw_button((WORD)(LOCAL_X + LOCAL_W - HSCROLL_H), y, HSCROLL_H, HSCROLL_H, ">");
+    clear_rect((WORD)(track_x + 1), (WORD)(y + 1),
+               (WORD)(track_w - 2), (WORD)(HSCROLL_H - 2));
+    draw_box(track_x, y, track_w, HSCROLL_H);
+    if (g_local_left_max)
+        thumb_x += (WORD)((g_local_left * (track_w - 8)) / g_local_left_max);
+    RectFill(g_win->RPort, (WORD)(thumb_x + 1), (WORD)(y + 2),
+             (WORD)(thumb_x + 7), (WORD)(y + HSCROLL_H - 2));
+}
+
+static void move_local_horizontal(WORD mx)
+{
+    int track_x = LOCAL_X + HSCROLL_H + 2;
+    int track_w = LOCAL_W - 2 * HSCROLL_H - 12;
+    int rel = mx - track_x;
+    if (rel < 0)
+        rel = 0;
+    if (rel > track_w)
+        rel = track_w;
+    g_local_left = track_w > 0 ? (rel * g_local_left_max) / track_w : 0;
+}
+
 static void draw_list(WORD x, WORD y, WORD w, WORD h,
                       struct FtpEntry *entries, int count, int selected,
                       int top, int show_dirs)
@@ -1084,11 +1240,47 @@ static void draw_list(WORD x, WORD y, WORD w, WORD h,
             !text_equal(entries[entry_index].name, "..")) {
             copy_limited(display, sizeof(display), "[DIR] ");
             append_text(display, sizeof(display), entries[entry_index].name);
-            draw_text_bounded((WORD)(x + 4), row_y, display, (WORD)(text_w - 4));
+            draw_text_bounded((WORD)(x + 4), row_y,
+                entries == g_remote_entries ? remote_visible_text(display, (WORD)(text_w - 4)) :
+                    local_visible_text(display, (WORD)(text_w - 4)),
+                (WORD)(text_w - 4));
         } else {
-            draw_text_bounded((WORD)(x + 4), row_y, entries[entry_index].name, (WORD)(text_w - 4));
+            const char *name = entries[entry_index].name;
+            draw_text_bounded((WORD)(x + 4), row_y,
+                entries == g_remote_entries ? remote_visible_text(name, (WORD)(text_w - 4)) :
+                    local_visible_text(name, (WORD)(text_w - 4)),
+                (WORD)(text_w - 4));
         }
         SetAPen(g_win->RPort, 1);
+    }
+}
+
+static void draw_local_contents(void)
+{
+    if (!g_win)
+        return;
+    SetDrMd(g_win->RPort, JAM1);
+    SetAPen(g_win->RPort, 1);
+    draw_list(LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H,
+              g_local_entries, g_local_count, g_local_sel, g_local_top, 1);
+    draw_local_horizontal();
+}
+
+/* Scrolling changes only the pane and, horizontally, the remote path. */
+static void draw_remote_contents(int horizontal)
+{
+    if (!g_win)
+        return;
+    SetDrMd(g_win->RPort, JAM1);
+    SetAPen(g_win->RPort, 1);
+    draw_list(REMOTE_X, REMOTE_Y, REMOTE_W, REMOTE_H,
+              g_remote_entries, g_remote_count, g_remote_sel, g_remote_top, 1);
+    if (horizontal) {
+        WORD width = (WORD)(g_win->Width - g_win->BorderRight - 291);
+        draw_remote_horizontal();
+        clear_rect(285, (WORD)(45 - g_win->RPort->TxBaseline), width,
+                   (WORD)(g_win->RPort->TxHeight - 1));
+        draw_text_xy(285, 45, remote_visible_text(g_remote_path, width));
     }
 }
 
@@ -1100,6 +1292,8 @@ static void draw_ui(void)
     if (!g_win)
         return;
     update_layout();
+    update_remote_horizontal();
+    update_local_horizontal();
     win_w = g_win->Width;
     win_h = g_win->Height;
     SetDrMd(g_win->RPort, JAM1);
@@ -1128,14 +1322,16 @@ static void draw_ui(void)
 
     draw_text_xy((WORD)(g_path_gad.LeftEdge - 55), 25, "Local:");
     draw_field_frame(&g_path_gad);
-    draw_button(BTN_LOAD_X, BTN_LOAD_Y, BTN_LOAD_W, BTN_LOAD_H, "Load");
+    draw_button(BTN_OPEN_X, BTN_OPEN_Y, BTN_OPEN_W, BTN_OPEN_H, "Open");
     draw_text_xy(230, 45, "Remote:");
-    draw_text_xy(285, 45, g_remote_path);
+    draw_text_xy(285, 45, remote_visible_text(g_remote_path, (WORD)(win_w - g_win->BorderRight - 291)));
 
     draw_text_xy(LOCAL_X, (WORD)(LOCAL_Y - 4), "Local files");
     draw_text_xy(REMOTE_X, (WORD)(REMOTE_Y - 4), "FTP files");
     draw_list(LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H, g_local_entries, g_local_count, g_local_sel, g_local_top, 1);
     draw_list(REMOTE_X, REMOTE_Y, REMOTE_W, REMOTE_H, g_remote_entries, g_remote_count, g_remote_sel, g_remote_top, 1);
+    draw_remote_horizontal();
+    draw_local_horizontal();
     draw_button(BTN_UPLOAD_X, BTN_UPLOAD_Y, BTN_UPLOAD_W, BTN_UPLOAD_H, "->");
     draw_button(BTN_DOWNLOAD_X, BTN_DOWNLOAD_Y, BTN_DOWNLOAD_W, BTN_DOWNLOAD_H, "<-");
     draw_button(BTN_DIRPLUS_X, BTN_DIRPLUS_Y, BTN_DIRPLUS_W, BTN_DIRPLUS_H, "DIR +");
@@ -1160,6 +1356,110 @@ static void draw_status_now(void)
 static void set_status_draw(const char *text)
 {
     set_status(text);
+    draw_status_now();
+}
+
+/* One transfer at a time; the static fallback also works under low memory. */
+struct TransferBuffer {
+    UBYTE *data;
+    ULONG capacity;
+    ULONG used;
+    ULONG position;
+};
+static UBYTE g_io_fallback[2048];
+static int g_upload_chunk = 512;
+static int g_size_unavailable;
+static ULONG g_progress_stamp;
+static ULONG g_data_ms;
+static ULONG g_size_check_ms;
+static ULONG g_list_ms;
+
+static ULONG transfer_clock_ms(void)
+{
+    ULONG seconds;
+    ULONG micros;
+    CurrentTime(&seconds, &micros);
+    return seconds * 1000UL + micros / 1000UL;
+}
+
+static void transfer_buffer_init(struct TransferBuffer *buffer)
+{
+    ULONG capacity;
+    buffer->used = buffer->position = 0;
+    for (capacity = 8192; capacity >= 2048; capacity /= 2) {
+        buffer->data = (UBYTE *)AllocMem(capacity, MEMF_PUBLIC);
+        if (buffer->data) {
+            buffer->capacity = capacity;
+            return;
+        }
+    }
+    buffer->data = g_io_fallback;
+    buffer->capacity = sizeof(g_io_fallback);
+}
+
+static void transfer_buffer_free(struct TransferBuffer *buffer)
+{
+    if (buffer->data && buffer->data != g_io_fallback)
+        FreeMem(buffer->data, buffer->capacity);
+    buffer->data = 0;
+    buffer->capacity = buffer->used = buffer->position = 0;
+}
+
+static int transfer_flush(struct TransferBuffer *buffer, BPTR file)
+{
+    ULONG offset = 0;
+    while (offset < buffer->used) {
+        LONG wrote;
+        if (!process_operation_events())
+            return 0;
+        wrote = Write(file, buffer->data + offset, buffer->used - offset);
+        if (wrote <= 0 || (ULONG)wrote > buffer->used - offset) {
+            set_status_draw("Local write failed (disk full?)");
+            return 0;
+        }
+        offset += wrote;
+    }
+    buffer->used = 0;
+    return 1;
+}
+
+static int transfer_store(struct TransferBuffer *buffer, BPTR file, const UBYTE *data, ULONG length)
+{
+    while (length) {
+        ULONG part = buffer->capacity - buffer->used;
+        if (!process_operation_events())
+            return 0;
+        if (part > length)
+            part = length;
+        CopyMem((APTR)data, buffer->data + buffer->used, part);
+        buffer->used += part;
+        data += part;
+        length -= part;
+        if (buffer->used == buffer->capacity && !transfer_flush(buffer, file))
+            return 0;
+    }
+    return 1;
+}
+
+static void transfer_progress(const char *label, LONG bytes)
+{
+    ULONG now = transfer_clock_ms();
+    if (now - g_progress_stamp < 250)
+        return;
+    g_progress_stamp = now;
+    set_status_kb(label, bytes);
+    draw_status_now();
+}
+
+static void show_transfer_timings(void)
+{
+    set_status("Data ");
+    append_status_dec(g_data_ms);
+    append_text(g_status, sizeof(g_status), "ms Size ");
+    append_status_dec(g_size_check_ms);
+    append_text(g_status, sizeof(g_status), "ms Lists ");
+    append_status_dec(g_list_ms);
+    append_text(g_status, sizeof(g_status), "ms");
     draw_status_now();
 }
 
@@ -1190,12 +1490,20 @@ static int top_from_scroll_y(WORD my, WORD y, WORD h, int count)
 
 static void update_scroll_from_mouse(int which, WORD my)
 {
+    int top;
     if (which == SCROLL_LOCAL) {
-        g_local_top = clamp_top(top_from_scroll_y(my, LOCAL_Y, LOCAL_H, g_local_count), g_local_count);
-        draw_ui();
+        top = clamp_top(top_from_scroll_y(my, LOCAL_Y, LOCAL_H, g_local_count), g_local_count);
+        if (top == g_local_top)
+            return;
+        g_local_top = top;
+        draw_list(LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H,
+                  g_local_entries, g_local_count, g_local_sel, g_local_top, 1);
     } else if (which == SCROLL_REMOTE) {
-        g_remote_top = clamp_top(top_from_scroll_y(my, REMOTE_Y, REMOTE_H, g_remote_count), g_remote_count);
-        draw_ui();
+        top = clamp_top(top_from_scroll_y(my, REMOTE_Y, REMOTE_H, g_remote_count), g_remote_count);
+        if (top == g_remote_top)
+            return;
+        g_remote_top = top;
+        draw_remote_contents(0);
     }
 }
 
@@ -1219,20 +1527,6 @@ static void toggle_file_selected(struct FtpEntry *entries, int index, int count)
     entries[index].selected = entries[index].selected ? 0 : 1;
 }
 
-static const char *basename_any(const char *path)
-{
-    const char *base = path;
-    const char *p = path;
-    if (!path)
-        return 0;
-    while (*p) {
-        if (*p == '/' || *p == ':')
-            base = p + 1;
-        ++p;
-    }
-    return *base ? base : 0;
-}
-
 static void build_local_full_path(char *out, int out_len, const char *name)
 {
     copy_limited(out, out_len, g_local_path);
@@ -1251,6 +1545,15 @@ static void add_local_parent_entry(void)
     g_local_entries[g_local_count].is_dir = 1;
     g_local_entries[g_local_count].selected = 0;
     ++g_local_count;
+}
+
+static int path_can_enter(const char *base, const char *name)
+{
+    if (text_len(base) + text_len(name) + 2 > PATH_BUF_SIZE) {
+        set_status_draw("Path too long");
+        return 0;
+    }
+    return 1;
 }
 
 static void local_path_enter(const char *dir)
@@ -1557,9 +1860,14 @@ static int upload_send_chunk(struct Library *base, int fd, const char *buf, int 
     int err;
     int retries = 0;
     while (sent_total < len) {
-        if (!wait_for_socket(base, fd, 1))
+        int amount = len - sent_total;
+        if (!process_operation_events())
             return 0;
-        sent = call_send(base, fd, buf + sent_total, len - sent_total, 0);
+        if (amount > g_upload_chunk)
+            amount = g_upload_chunk;
+        if (amount > AMITCP13_IPC_PAYLOAD_MAX)
+            amount = AMITCP13_IPC_PAYLOAD_MAX;
+        sent = call_send(base, fd, buf + sent_total, amount, 0);
         if (sent_total == 0 && total && *total == 0) {
             ftp_debug_puts("FTP GUI PUT first Send() returned=");
             ftp_debug_dec((LONG)sent);
@@ -1582,6 +1890,8 @@ static int upload_send_chunk(struct Library *base, int fd, const char *buf, int 
                 draw_status_now();
                 return 0;
             }
+            if (!wait_for_socket(base, fd, 1))
+                return 0;
             continue;
         }
         err = call_errno(base);
@@ -1591,6 +1901,8 @@ static int upload_send_chunk(struct Library *base, int fd, const char *buf, int 
                 draw_status_now();
                 return 0;
             }
+            if (!wait_for_socket(base, fd, 1))
+                return 0;
             continue;
         }
         set_status_errno("send failed", err);
@@ -1794,6 +2106,10 @@ static int build_command1(const char *cmd, const char *arg)
 {
     int pos = 0;
     g_cmd[0] = 0;
+    if (text_len(cmd) + (arg && arg[0] ? text_len(arg) + 1 : 0) + 2 >= CMD_BUF_SIZE) {
+        set_status("FTP command too long");
+        return 0;
+    }
     append_text(g_cmd, CMD_BUF_SIZE, cmd);
     if (arg && arg[0]) {
         append_text(g_cmd, CMD_BUF_SIZE, " ");
@@ -1898,6 +2214,7 @@ static void clear_remote_session_state(void)
     g_remote_count = 0;
     g_remote_sel = -1;
     g_remote_top = 0;
+    g_remote_left = 0;
     g_last_remote_click_index = -1;
     copy_limited(g_remote_path, sizeof(g_remote_path), "/");
 }
@@ -1949,7 +2266,7 @@ static void ftp_gui_disconnect_session(const char *status)
         draw_ui();
 }
 
-static int ftp_pasv_open_data(const char *status_on_fail)
+static int ftp_pasv_open_data(const char *status_on_fail, const char *progress)
 {
     ULONG data_ip;
     UWORD data_port;
@@ -1965,7 +2282,7 @@ static int ftp_pasv_open_data(const char *status_on_fail)
             set_status_draw(status_on_fail);
         return -1;
     }
-    set_status_draw("Connecting data socket...");
+    set_status_draw(progress);
     fd = open_connected_socket(g_sock_base, data_ip, data_port);
     if (fd < 0) {
         ftp_close_data();
@@ -2065,6 +2382,10 @@ static void add_remote_line(const char *line)
         g_remote_incomplete = 1;
         return;
     }
+    if (text_len(name) >= NAME_BUF_SIZE) {
+        g_remote_incomplete = 2;
+        return;
+    }
     copy_limited(g_remote_entries[g_remote_count].name, NAME_BUF_SIZE, name);
     g_remote_entries[g_remote_count].is_dir = (line[0] == 'd');
     g_remote_entries[g_remote_count].selected = 0;
@@ -2116,7 +2437,9 @@ static void remote_path_parent(void)
     }
 }
 
-static int ftp_list_remote(void)
+static int g_measuring_transfer;
+
+static int ftp_list_remote_impl(void)
 {
     int data_fd = -1;
     int code;
@@ -2127,8 +2450,8 @@ static int ftp_list_remote(void)
     if (!g_connected || !process_operation_events())
         return 0;
     ftp_debug_puts("FTP GUI LIST start\n");
-    set_status_draw("Listing remote...");
-    data_fd = ftp_pasv_open_data("LIST failed");
+    set_status_draw("Listing Directory...");
+    data_fd = ftp_pasv_open_data("LIST failed", "Listing Directory...");
     if (data_fd < 0) {
         ftp_gui_disconnect_session("LIST failed: reconnect required");
         return 0;
@@ -2144,6 +2467,7 @@ static int ftp_list_remote(void)
     g_remote_count = 0;
     g_remote_sel = -1;
     g_remote_top = 0;
+    g_remote_left = 0;
     add_remote_parent_entry();
     g_line[0] = 0;
     for (;;) {
@@ -2168,6 +2492,8 @@ static int ftp_list_remote(void)
                         line_pos = 0;
                     } else if (line_pos < LINE_BUF_SIZE - 1) {
                         g_line[line_pos++] = ch;
+                    } else {
+                        g_remote_incomplete = 2;
                     }
                 }
                 continue;
@@ -2184,7 +2510,8 @@ static int ftp_list_remote(void)
                 }
                 sort_entries(g_remote_entries, g_remote_count);
                 ftp_debug_puts("FTP GUI LIST end\n");
-                set_status(g_remote_incomplete ? "Remote list incomplete: no memory" : "Remote list loaded");
+                set_status(g_remote_incomplete == 2 ? "Remote list incomplete: name/line too long" :
+                           g_remote_incomplete ? "Remote list incomplete: no memory" : "Remote list loaded");
                 draw_ui();
                 return !g_remote_incomplete;
             }
@@ -2200,7 +2527,16 @@ static int ftp_list_remote(void)
     }
 }
 
-static void load_local_path(void)
+static int ftp_list_remote(void)
+{
+    ULONG started = transfer_clock_ms();
+    int ok = ftp_list_remote_impl();
+    if (g_measuring_transfer)
+        g_list_ms += transfer_clock_ms() - started;
+    return ok;
+}
+
+static void load_local_path_impl(void)
 {
     BPTR lock;
     struct FileInfoBlock *fib;
@@ -2210,6 +2546,7 @@ static void load_local_path(void)
     g_local_count = 0;
     g_local_sel = -1;
     g_local_top = 0;
+    g_local_left = 0;
     g_last_local_click_index = -1;
     add_local_parent_entry();
     lock = Lock((CONST_STRPTR)g_local_path, ACCESS_READ);
@@ -2255,6 +2592,14 @@ static void load_local_path(void)
     sort_entries(g_local_entries, g_local_count);
     set_status(g_local_incomplete ? "Local list incomplete: read/memory error" : "Local directory loaded");
     draw_ui();
+}
+
+static void load_local_path(void)
+{
+    ULONG started = transfer_clock_ms();
+    load_local_path_impl();
+    if (g_measuring_transfer)
+        g_list_ms += transfer_clock_ms() - started;
 }
 
 static int ftp_connect_login(void)
@@ -2355,355 +2700,194 @@ static int ftp_connect_login(void)
     return 1;
 }
 
-static int ftp_download_single_selected(void)
+static int ftp_download_file(const char *remote)
 {
+    struct TransferBuffer buffer;
     int data_fd = -1;
     int code;
     int got;
-    int err;
-    BPTR file;
-    LONG wrote;
+    int ok = 0;
+    BPTR file = 0;
     LONG total = 0;
-    LONG next_progress = PROGRESS_STEP_BYTES;
     LONG expected_size = -1;
+    ULONG started = transfer_clock_ms();
     char local_file[PATH_BUF_SIZE + NAME_BUF_SIZE];
-    const char *remote;
 
-    if (g_transfer_busy) {
-        set_status_draw("Busy");
-        return 0;
-    }
+    transfer_buffer_init(&buffer);
     g_transfer_busy = 1;
-    if (!g_connected) {
-        set_status_draw("Not connected");
-        g_transfer_busy = 0;
-        return 0;
+    g_progress_stamp = started;
+    if (!g_connected || !process_operation_events())
+        goto done;
+    if (strchr(remote, '/') || strchr(remote, ':')) {
+        set_status_draw("Filename cannot be represented locally");
+        goto done;
     }
-    if (g_remote_sel < 0 || g_remote_sel >= g_remote_count) {
-        set_status_draw("No remote file selected");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    if (g_remote_entries[g_remote_sel].is_dir) {
-        set_status_draw("Select a file, not a directory");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    remote = g_remote_entries[g_remote_sel].name;
     if (!ftp_get_remote_size(remote, &expected_size)) {
-        ftp_gui_disconnect_session("Download failed: reconnect required");
-        g_transfer_busy = 0;
-        return 0;
+        set_status_draw("Download SIZE failed");
+        goto done;
     }
-    build_local_full_path(local_file, sizeof(local_file), basename_any(remote));
+    build_local_full_path(local_file, sizeof(local_file), remote);
     file = Open((CONST_STRPTR)local_file, MODE_NEWFILE);
     if (!file) {
-        set_status_draw("local file open failed");
-        g_transfer_busy = 0;
-        return 0;
+        set_status_draw("Local file open failed");
+        goto done;
     }
-    data_fd = ftp_pasv_open_data("Download failed");
-    if (data_fd < 0) {
-        Close(file);
-        ftp_gui_disconnect_session("Download failed: reconnect required");
-        g_transfer_busy = 0;
-        return 0;
-    }
+    data_fd = ftp_pasv_open_data("Download failed", "Connecting data socket...");
+    if (data_fd < 0)
+        goto done;
     if (!ftp_command(g_sock_base, g_ctrl_fd, "RETR", remote, &code) || (code != 125 && code != 150)) {
-        close_data_socket(&data_fd);
-        Close(file);
         set_status_draw("RETR failed");
-        g_transfer_busy = 0;
-        return 0;
+        goto done;
     }
     set_status_draw("Downloading...");
     for (;;) {
-        if (!wait_for_socket(g_sock_base, data_fd, 0)) {
-            close_data_socket(&data_fd);
-            Close(file);
-            ftp_gui_disconnect_session("Download failed: reconnect required");
-            g_transfer_busy = 0;
-            return 0;
-        }
-        for (;;) {
-            if (!process_operation_events())
-                break;
-            got = call_recv(g_sock_base, data_fd, g_data_buf, sizeof(g_data_buf), 0);
-            if (got > 0) {
-                wrote = Write(file, g_data_buf, got);
-                if (wrote != got) {
-                    close_data_socket(&data_fd);
-                    Close(file);
-                    ftp_recover_control_after_transfer_error("Download failed: reconnect required");
-                    g_transfer_busy = 0;
-                    return 0;
-                }
-                total += got;
-                if (total >= next_progress) {
-                    set_status_kb("Downloading", total);
-                    draw_status_now();
-                    while (next_progress <= total)
-                        next_progress += PROGRESS_STEP_BYTES;
-                }
-                continue;
-            }
-            if (got == 0) {
-                close_data_socket(&data_fd);
-                Close(file);
-                if (!ftp_read_final_transfer_reply("Download failed")) {
-                    ftp_gui_disconnect_session("Download failed: reconnect required");
-                    g_transfer_busy = 0;
-                    return 0;
-                }
-                if (expected_size >= 0 && total < expected_size) {
-                    ftp_gui_disconnect_session("Download incomplete: reconnect required");
-                    g_transfer_busy = 0;
-                    return 0;
-                }
-                set_status_kb("Download complete", total);
-                load_local_path();
-                set_status_kb("Download complete", total);
-                draw_ui();
-                g_transfer_busy = 0;
-                return 1;
-            }
-            err = call_errno(g_sock_base);
-            if (socket_retry_error(err))
-                break;
-            close_data_socket(&data_fd);
-            Close(file);
-            ftp_gui_disconnect_session(0);
-            set_status_errno("Download recv failed", err);
-            if (g_win)
-                draw_ui();
-            g_transfer_busy = 0;
-            return 0;
-        }
-    }
-}
-
-static int ftp_verify_uploaded_file(const char *remote, const char *local_file, LONG expected_size)
-{
-    int data_fd = -1;
-    int code;
-    int got;
-    int err;
-    BPTR file;
-    LONG local_got;
-    LONG total = 0;
-    int i;
-
-    if (!remote || !local_file)
-        return 0;
-    file = Open((CONST_STRPTR)local_file, MODE_OLDFILE);
-    if (!file) {
-        set_status_draw("Verify local open failed");
-        return 0;
-    }
-    data_fd = ftp_pasv_open_data("Verify failed");
-    if (data_fd < 0) {
-        Close(file);
-        return 0;
-    }
-    if (!ftp_command(g_sock_base, g_ctrl_fd, "RETR", remote, &code) || (code != 125 && code != 150)) {
-        close_data_socket(&data_fd);
-        Close(file);
-        set_status_draw("Verify RETR failed");
-        return 0;
-    }
-    for (;;) {
-        if (!wait_for_socket(g_sock_base, data_fd, 0)) {
-            close_data_socket(&data_fd);
-            Close(file);
-            ftp_gui_disconnect_session("Verify failed: reconnect required");
-            return 0;
-        }
-        for (;;) {
-            if (!process_operation_events())
-                break;
-            got = call_recv(g_sock_base, data_fd, g_data_buf, VERIFY_CHUNK_SIZE, 0);
-            if (got > 0) {
-                local_got = Read(file, g_verify_buf, got);
-                if (local_got != got) {
-                    close_data_socket(&data_fd);
-                    Close(file);
-                    ftp_gui_disconnect_session("Upload verify size mismatch");
-                    return 0;
-                }
-                for (i = 0; i < got; ++i) {
-                    if (g_data_buf[i] != g_verify_buf[i]) {
-                        close_data_socket(&data_fd);
-                        Close(file);
-                        ftp_gui_disconnect_session("Upload verify mismatch");
-                        return 0;
-                    }
-                }
-                total += got;
-                continue;
-            }
-            if (got == 0) {
-                close_data_socket(&data_fd);
-                Close(file);
-                if (!ftp_read_final_transfer_reply("Verify failed")) {
-                    ftp_gui_disconnect_session("Verify failed: reconnect required");
-                    return 0;
-                }
-                if (expected_size >= 0 && total != expected_size) {
-                    ftp_gui_disconnect_session("Upload verify size mismatch");
-                    return 0;
-                }
-                set_status_draw("Upload verify OK");
-                return 1;
-            }
-            err = call_errno(g_sock_base);
-            if (socket_retry_error(err))
-                break;
-            close_data_socket(&data_fd);
-            Close(file);
-            ftp_gui_disconnect_session("Verify failed: reconnect required");
-            return 0;
-        }
-    }
-}
-
-static int ftp_upload_single_selected(void)
-{
-    int data_fd = -1;
-    int code;
-    BPTR file;
-    LONG got;
-    LONG total = 0;
-    LONG next_progress = PROGRESS_STEP_BYTES;
-    char local_file[PATH_BUF_SIZE + NAME_BUF_SIZE];
-    const char *remote;
-
-    if (g_transfer_busy) {
-        set_status_draw("Busy");
-        return 0;
-    }
-    g_transfer_busy = 1;
-    if (!g_connected) {
-        set_status_draw("Not connected");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    if (g_local_sel < 0 || g_local_sel >= g_local_count) {
-        set_status_draw("No local file selected");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    if (text_equal(g_local_entries[g_local_sel].name, "..")) {
-        set_status_draw("Select a file to upload");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    if (g_local_entries[g_local_sel].is_dir) {
-        set_status_draw("Cannot upload directory");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    remote = g_local_entries[g_local_sel].name;
-    build_local_full_path(local_file, sizeof(local_file), remote);
-    file = Open((CONST_STRPTR)local_file, MODE_OLDFILE);
-    if (!file) {
-        set_status_draw("local file open failed");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    if (!ftp_command(g_sock_base, g_ctrl_fd, "TYPE", "I", &code) || code < 200 || code >= 300) {
-        Close(file);
-        ftp_gui_disconnect_session("Upload failed: TYPE I");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    data_fd = ftp_pasv_open_data("Upload failed");
-    if (data_fd < 0) {
-        Close(file);
-        ftp_gui_disconnect_session("Upload failed: reconnect required");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    if (!ftp_command(g_sock_base, g_ctrl_fd, "STOR", remote, &code) || (code != 125 && code != 150)) {
-        close_data_socket(&data_fd);
-        Close(file);
-        set_status_draw("STOR failed");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    set_status_draw("Uploading...");
-    for (;;) {
-        got = Read(file, g_data_buf, UPLOAD_CHUNK_SIZE);
+        if (!process_operation_events())
+            goto done;
+        got = call_recv(g_sock_base, data_fd, g_data_buf, sizeof(g_data_buf), 0);
         if (got > 0) {
-            if (!upload_send_chunk(g_sock_base, data_fd, (const char *)g_data_buf, (int)got, &total)) {
-                close_data_socket(&data_fd);
-                Close(file);
-                ftp_gui_disconnect_session("Upload failed: reconnect required");
-                g_transfer_busy = 0;
-                return 0;
+            if (total > 0x7fffffffL - got) {
+                set_status_draw("File exceeds supported size");
+                goto done;
             }
-            if (total >= next_progress) {
-                set_status_kb("Uploading", total);
-                draw_status_now();
-                while (next_progress <= total)
-                    next_progress += PROGRESS_STEP_BYTES;
-            }
+            if (!transfer_store(&buffer, file, g_data_buf, got))
+                goto done;
+            total += got;
+            transfer_progress("Downloading", total);
             continue;
         }
         if (got == 0)
             break;
-        close_data_socket(&data_fd);
-        Close(file);
-        ftp_gui_disconnect_session("Upload failed: reconnect required");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    Close(file);
-    upload_drain_socket(g_sock_base, data_fd);
-    close_data_socket(&data_fd);
-    if (!ftp_read_final_transfer_reply("Upload failed")) {
-        ftp_gui_disconnect_session("Upload failed: reconnect required");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    {
-        LONG remote_size = -1;
-        if (ftp_get_remote_size(remote, &remote_size) && remote_size >= 0 && remote_size != total) {
-            set_status_draw("Upload size mismatch");
-            g_transfer_busy = 0;
-            return 0;
+        if (!socket_retry_error(call_errno(g_sock_base))) {
+            set_status_errno("Download recv failed", call_errno(g_sock_base));
+            goto done;
         }
+        if (!wait_for_socket(g_sock_base, data_fd, 0))
+            goto done;
     }
-    if (!ftp_verify_uploaded_file(remote, local_file, total)) {
-        g_transfer_busy = 0;
-        return 0;
+    if (!transfer_flush(&buffer, file))
+        goto done;
+    /* Before dos.library V36, Close() has no defined return value.
+       transfer_flush() checks every Write(); never interpret Close() on 1.3. */
+    Close(file);
+    file = 0;
+    close_data_socket(&data_fd);
+    if (!ftp_read_final_transfer_reply("Download failed"))
+        goto done;
+    if (expected_size >= 0 && total != expected_size) {
+        set_status_draw("Download size mismatch");
+        goto done;
     }
-    set_status_kb("Upload complete", total);
-    draw_status_now();
-    if (!ftp_list_remote()) {
-        ftp_gui_disconnect_session("Upload complete; reconnect required");
-        g_transfer_busy = 0;
-        return 0;
-    }
-    set_status_kb("Upload complete", total);
-    draw_status_now();
+    ok = 1;
+    set_status_kb("Download complete", total);
+
+done:
+    close_data_socket(&data_fd);
+    if (file)
+        Close(file);
+    transfer_buffer_free(&buffer);
+    g_data_ms += transfer_clock_ms() - started;
+    if (!ok)
+        ftp_gui_disconnect_session(0);
     g_transfer_busy = 0;
-    return 1;
+    draw_status_now();
+    return ok;
 }
 
+static int ftp_upload_file(const char *remote)
+{
+    struct TransferBuffer buffer;
+    int data_fd = -1;
+    int code;
+    int ok = 0;
+    BPTR file = 0;
+    LONG got;
+    LONG total = 0;
+    LONG remote_size = -1;
+    ULONG started = transfer_clock_ms();
+    char local_file[PATH_BUF_SIZE + NAME_BUF_SIZE];
+
+    transfer_buffer_init(&buffer);
+    g_transfer_busy = 1;
+    g_progress_stamp = started;
+    if (!g_connected || !process_operation_events())
+        goto done;
+    build_local_full_path(local_file, sizeof(local_file), remote);
+    file = Open((CONST_STRPTR)local_file, MODE_OLDFILE);
+    if (!file) {
+        set_status_draw("Local file open failed");
+        goto done;
+    }
+    if (!ftp_command(g_sock_base, g_ctrl_fd, "TYPE", "I", &code) || code < 200 || code >= 300) {
+        set_status_draw("Upload failed: TYPE I");
+        goto done;
+    }
+    data_fd = ftp_pasv_open_data("Upload failed", "Connecting data socket...");
+    if (data_fd < 0)
+        goto done;
+    if (!ftp_command(g_sock_base, g_ctrl_fd, "STOR", remote, &code) || (code != 125 && code != 150)) {
+        set_status_draw("STOR failed");
+        goto done;
+    }
+    set_status_draw("Uploading...");
+    for (;;) {
+        if (!process_operation_events())
+            goto done;
+        got = Read(file, buffer.data, buffer.capacity);
+        if (got < 0) {
+            set_status_draw("Upload local read failed");
+            goto done;
+        }
+        if (got == 0)
+            break;
+        if (total > 0x7fffffffL - got) {
+            set_status_draw("File exceeds supported size");
+            goto done;
+        }
+        if (!upload_send_chunk(g_sock_base, data_fd, (const char *)buffer.data, (int)got, &total))
+            goto done;
+        transfer_progress("Uploading", total);
+    }
+    Close(file);
+    file = 0;
+    /* Retain the existing TheWire13 transfer-end handling until hardware tests. */
+    upload_drain_socket(g_sock_base, data_fd);
+    close_data_socket(&data_fd);
+    if (!ftp_read_final_transfer_reply("Upload failed"))
+        goto done;
+    ok = 1;
+done:
+    close_data_socket(&data_fd);
+    if (file)
+        Close(file);
+    transfer_buffer_free(&buffer);
+    g_data_ms += transfer_clock_ms() - started;
+    if (ok) {
+        started = transfer_clock_ms();
+        if (!ftp_get_remote_size(remote, &remote_size)) {
+            set_status_draw("Upload SIZE failed");
+            ok = 0;
+        } else if (remote_size >= 0 && remote_size != total) {
+            set_status_draw("Upload size mismatch");
+            ok = 0;
+        } else if (remote_size < 0) {
+            g_size_unavailable = 1;
+        }
+        g_size_check_ms += transfer_clock_ms() - started;
+    }
+    if (!ok)
+        ftp_gui_disconnect_session(0);
+    else if (remote_size < 0)
+        set_status_draw("Upload complete; SIZE unavailable, unverified");
+    else
+        set_status_kb("Upload complete", total);
+    g_transfer_busy = 0;
+    draw_status_now();
+    return ok;
+}
 
 static int entry_is_real(const struct FtpEntry *entry)
 {
     return entry && !text_equal(entry->name, "..");
-}
-
-static int find_entry_index(struct FtpEntry *entries, int count, const char *name)
-{
-    int i;
-    for (i = 0; i < count; ++i) {
-        if (text_equal(entries[i].name, name))
-            return i;
-    }
-    return -1;
 }
 
 static struct FtpEntry *snapshot_entries(struct FtpEntry *entries, int count, int selected_only, int *out_count)
@@ -2772,6 +2956,8 @@ static int local_create_dir_in_current(const char *name)
 static int ftp_cwd_name(const char *name)
 {
     int code;
+    if (!path_can_enter(g_remote_path, name))
+        return 0;
     if (!ftp_command(g_sock_base, g_ctrl_fd, "CWD", name, &code) || code < 200 || code >= 300) {
         ftp_gui_disconnect_session("Directory failed: reconnect required");
         return 0;
@@ -2806,110 +2992,81 @@ static int ftp_mkdir_if_needed(const char *name)
 
 static int ftp_download_remote_entry_recursive(const char *name, UBYTE is_dir)
 {
-    struct FtpEntry *snap;
-    int snap_count;
+    struct FtpEntry *snap = 0;
+    int snap_count = 0;
     int i;
-    int index;
-    int ok = 1;
+    int entered = 0;
+    int ok = 0;
 
     if (!process_operation_events())
         return 0;
-
-    if (!is_dir) {
-        index = find_entry_index(g_remote_entries, g_remote_count, name);
-        if (index < 0) {
-            set_status_draw("Remote file vanished");
-            return 0;
-        }
-        g_remote_sel = index;
-        return ftp_download_single_selected();
-    }
-
-    set_status_draw("Downloading directory...");
-    if (!local_create_dir_in_current(name))
+    if (!is_dir)
+        return ftp_download_file(name);
+    if (!path_can_enter(g_local_path, name) || !path_can_enter(g_remote_path, name))
         return 0;
-    if (!ftp_cwd_name(name))
+    if (!local_create_dir_in_current(name) || !ftp_cwd_name(name))
         return 0;
     local_path_enter(name);
-    load_local_path();
+    entered = 1;
     if (!ftp_list_remote())
-        return 0;
+        goto done;
     snap = snapshot_entries(g_remote_entries, g_remote_count, 0, &snap_count);
     if (!snap) {
-        set_status_draw("No memory");
-        return 0;
+        set_status_draw("Cannot snapshot directory (incomplete/no memory)");
+        goto done;
     }
+    ok = 1;
     for (i = 0; i < snap_count; ++i) {
-        if (!process_operation_events()) {
-            ok = 0;
-            break;
-        }
-        if (!ftp_download_remote_entry_recursive(snap[i].name, snap[i].is_dir)) {
+        if (!process_operation_events() ||
+            !ftp_download_remote_entry_recursive(snap[i].name, snap[i].is_dir)) {
             ok = 0;
             break;
         }
     }
+done:
     free_entries(snap);
-    if (!ftp_cdup_dir())
-        ok = 0;
-    local_path_parent();
-    load_local_path();
-    if (!ftp_list_remote())
-        ok = 0;
+    if (entered) {
+        local_path_parent();
+        if (g_connected && !g_cancel_requested && !ftp_cdup_dir())
+            ok = 0;
+    }
     return ok;
 }
 
 static int ftp_upload_local_entry_recursive(const char *name, UBYTE is_dir)
 {
-    struct FtpEntry *snap;
-    int snap_count;
+    struct FtpEntry *snap = 0;
+    int snap_count = 0;
     int i;
-    int index;
-    int ok = 1;
+    int ok = 0;
 
     if (!process_operation_events())
         return 0;
-
-    if (!is_dir) {
-        index = find_entry_index(g_local_entries, g_local_count, name);
-        if (index < 0) {
-            set_status_draw("Local file vanished");
-            return 0;
-        }
-        g_local_sel = index;
-        return ftp_upload_single_selected();
-    }
-
-    set_status_draw("Uploading directory...");
-    if (!ftp_mkdir_if_needed(name))
+    if (!is_dir)
+        return ftp_upload_file(name);
+    if (!path_can_enter(g_local_path, name) || !path_can_enter(g_remote_path, name))
         return 0;
-    if (!ftp_cwd_name(name))
+    if (!ftp_mkdir_if_needed(name) || !ftp_cwd_name(name))
         return 0;
     local_path_enter(name);
     load_local_path();
-    if (!ftp_list_remote())
-        return 0;
     snap = snapshot_entries(g_local_entries, g_local_count, 0, &snap_count);
     if (!snap) {
-        set_status_draw("No memory");
-        return 0;
+        set_status_draw("Cannot snapshot directory (incomplete/no memory)");
+        goto done;
     }
+    ok = 1;
     for (i = 0; i < snap_count; ++i) {
-        if (!process_operation_events()) {
-            ok = 0;
-            break;
-        }
-        if (!ftp_upload_local_entry_recursive(snap[i].name, snap[i].is_dir)) {
+        if (!process_operation_events() ||
+            !ftp_upload_local_entry_recursive(snap[i].name, snap[i].is_dir)) {
             ok = 0;
             break;
         }
     }
+done:
     free_entries(snap);
     local_path_parent();
-    load_local_path();
-    if (!ftp_cdup_dir())
-        ok = 0;
-    if (!ftp_list_remote())
+    if (g_connected && !g_cancel_requested && !ftp_cdup_dir())
         ok = 0;
     return ok;
 }
@@ -2981,6 +3138,11 @@ static int local_delete_path_recursive(const char *path)
             ok = 0;
             break;
         }
+        if (text_len(path) + text_len(snap[i].name) + 2 > (LONG)sizeof(child)) {
+            set_status_draw("Path too long: delete stopped");
+            ok = 0;
+            break;
+        }
         build_child_path(child, sizeof(child), path, snap[i].name);
         if (!local_delete_path_recursive(child)) {
             ok = 0;
@@ -3041,6 +3203,49 @@ static int ftp_delete_remote_entry_recursive(const char *name, UBYTE is_dir)
     return ok;
 }
 
+static void begin_transfer_batch(void)
+{
+    g_data_ms = g_size_check_ms = g_list_ms = 0;
+    g_size_unavailable = 0;
+    g_measuring_transfer = 1;
+}
+
+static int finish_transfer_batch(int ok, const char *local_path, const char *remote_path, int upload)
+{
+    char failure[sizeof(g_status)];
+    int cancelled = g_cancel_requested;
+    copy_limited(failure, sizeof(failure), g_status);
+    if (cancelled || (g_connected && !text_equal(g_remote_path, remote_path))) {
+        ftp_gui_disconnect_session(0);
+        ok = 0;
+    }
+    copy_limited(g_local_path, sizeof(g_local_path), local_path);
+    if (!g_close_requested) {
+        /* Reload the visible local directory after cancellation, too. */
+        g_cancel_requested = 0;
+        load_local_path();
+        if (g_local_incomplete && ok) {
+            ok = 0;
+            copy_limited(failure, sizeof(failure), g_status);
+        }
+        if (g_connected && !g_cancel_requested && !ftp_list_remote() && ok) {
+            ok = 0;
+            copy_limited(failure, sizeof(failure), g_status);
+        }
+        g_cancel_requested = cancelled || g_cancel_requested;
+    }
+    if (g_cancel_requested)
+        ok = 0;
+    if (!ok)
+        set_status_draw(failure);
+    else if (upload && g_size_unavailable)
+        set_status_draw("Uploads complete; some files unverified (no SIZE)");
+    else
+        set_status_draw(upload ? "Uploads complete" : "Downloads complete");
+    g_measuring_transfer = 0;
+    return ok;
+}
+
 static int ftp_download_selected(void)
 {
     struct FtpEntry *snap;
@@ -3064,11 +3269,13 @@ static int ftp_download_selected(void)
         return 0;
     }
 
+    begin_transfer_batch();
     copy_limited(start_local, sizeof(start_local), g_local_path);
     copy_limited(start_remote, sizeof(start_remote), g_remote_path);
     selected = selected_entry_count(g_remote_entries, g_remote_count) > 0;
     snap = snapshot_entries(g_remote_entries, g_remote_count, selected, &snap_count);
     if (!snap) {
+        g_measuring_transfer = 0;
         set_status_draw("No memory");
         return 0;
     }
@@ -3087,13 +3294,7 @@ static int ftp_download_selected(void)
         }
     }
     free_entries(snap);
-    copy_limited(g_local_path, sizeof(g_local_path), start_local);
-    copy_limited(g_remote_path, sizeof(g_remote_path), start_remote);
-    load_local_path();
-    ftp_list_remote();
-    if (ok)
-        set_status_draw("Downloads complete");
-    return ok;
+    return finish_transfer_batch(ok, start_local, start_remote, 0);
 }
 
 static int ftp_upload_selected(void)
@@ -3119,11 +3320,13 @@ static int ftp_upload_selected(void)
         return 0;
     }
 
+    begin_transfer_batch();
     copy_limited(start_local, sizeof(start_local), g_local_path);
     copy_limited(start_remote, sizeof(start_remote), g_remote_path);
     selected = selected_entry_count(g_local_entries, g_local_count) > 0;
     snap = snapshot_entries(g_local_entries, g_local_count, selected, &snap_count);
     if (!snap) {
+        g_measuring_transfer = 0;
         set_status_draw("No memory");
         return 0;
     }
@@ -3142,13 +3345,7 @@ static int ftp_upload_selected(void)
         }
     }
     free_entries(snap);
-    copy_limited(g_local_path, sizeof(g_local_path), start_local);
-    copy_limited(g_remote_path, sizeof(g_remote_path), start_remote);
-    load_local_path();
-    ftp_list_remote();
-    if (ok)
-        set_status_draw("Uploads complete");
-    return ok;
+    return finish_transfer_batch(ok, start_local, start_remote, 1);
 }
 
 static int dialog_button_hit(WORD mx, WORD my, WORD x, WORD y, WORD w, WORD h)
@@ -3190,6 +3387,213 @@ static void dialog_text(struct Window *win, WORD x, WORD y, const char *text)
     SetAPen(win->RPort, 1);
     Move(win->RPort, x, y);
     Text(win->RPort, (STRPTR)text, text_len(text));
+}
+
+#define DRIVE_ROWS 8
+#define DRIVE_ROW_H 11
+struct DriveEntry {
+    char path[258];
+    char volume[256];
+};
+
+/* Only active volumes: excludes assigns, console handlers and removed media.
+   Called with Forbid held; copy BCPL strings while their nodes are stable. */
+static int copy_mounted_drives(struct DeviceList *head, struct DriveEntry *out, int capacity)
+{
+    struct DeviceList *volume;
+    int count = 0;
+    for (volume = head; volume; volume = (struct DeviceList *)BADDR(volume->dl_Next)) {
+        struct DeviceList *device;
+        const UBYTE *name;
+        const UBYTE *label;
+        int i;
+        int length;
+        if (volume->dl_Type != DLT_VOLUME || !volume->dl_Task || !volume->dl_Name)
+            continue;
+        label = (const UBYTE *)BADDR(volume->dl_Name);
+        if (!label[0])
+            continue;
+        name = label;
+        for (device = head; device; device = (struct DeviceList *)BADDR(device->dl_Next)) {
+            if (device->dl_Type == DLT_DEVICE && device->dl_Task == volume->dl_Task && device->dl_Name) {
+                const UBYTE *candidate = (const UBYTE *)BADDR(device->dl_Name);
+                if (candidate[0]) {
+                    name = candidate;
+                    break;
+                }
+            }
+        }
+        if (out && count < capacity) {
+            length = name[0];
+            for (i = 0; i < length; ++i)
+                out[count].path[i] = (char)name[i + 1];
+            out[count].path[length] = ':';
+            out[count].path[length + 1] = 0;
+            length = label[0];
+            for (i = 0; i < length; ++i)
+                out[count].volume[i] = (char)label[i + 1];
+            out[count].volume[length] = 0;
+        }
+        ++count;
+    }
+    return count;
+}
+
+static struct DriveEntry *snapshot_mounted_drives(int *out_count, ULONG *out_bytes)
+{
+    struct DosInfo *info;
+    struct DriveEntry *entries = 0;
+    int capacity = 0;
+    int count;
+    int attempt;
+    ULONG bytes = 0;
+    *out_count = 0;
+    *out_bytes = 0;
+    /* Never keep DOS-list pointers across Permit, allocations or DOS calls. */
+    for (attempt = 0; attempt < 4; ++attempt) {
+        Forbid();
+        info = (struct DosInfo *)BADDR(DOSBase->dl_Root->rn_Info);
+        count = info ? copy_mounted_drives((struct DeviceList *)BADDR(info->di_DevInfo), entries, capacity) : 0;
+        Permit();
+        if (entries && count <= capacity) {
+            int i;
+            for (i = 1; i < count; ++i) {
+                struct DriveEntry item = entries[i];
+                int j = i;
+                while (j > 0 && text_compare_ci(item.path, entries[j - 1].path) < 0) {
+                    entries[j] = entries[j - 1];
+                    --j;
+                }
+                entries[j] = item;
+            }
+            *out_count = count;
+            *out_bytes = bytes;
+            return entries;
+        }
+        if (entries)
+            FreeMem(entries, bytes);
+        capacity = count + 8;
+        bytes = (ULONG)capacity * sizeof(*entries);
+        entries = (struct DriveEntry *)AllocMem(bytes, MEMF_PUBLIC | MEMF_CLEAR);
+        if (!entries)
+            return 0;
+    }
+    if (entries)
+        FreeMem(entries, bytes);
+    return 0;
+}
+
+static void drive_dialog_text(struct Window *win, WORD x, WORD y, WORD width, const char *text)
+{
+    LONG length = text_len(text);
+    while (length && TextLength(win->RPort, (STRPTR)text, length) > width)
+        --length;
+    Move(win->RPort, x, y);
+    Text(win->RPort, (STRPTR)text, length);
+}
+
+static void draw_drive_dialog(struct Window *win, const struct DriveEntry *entries, int count, int top)
+{
+    int row;
+    SetDrMd(win->RPort, JAM1);
+    dialog_clear_interior(win);
+    dialog_text(win, 12, 26, "Drive");
+    dialog_text(win, 160, 26, "Volume");
+    if (!count)
+        dialog_text(win, 12, 44, "No mounted volumes");
+    for (row = 0; row < DRIVE_ROWS && top + row < count; ++row) {
+        WORD y = (WORD)(42 + row * DRIVE_ROW_H);
+        drive_dialog_text(win, 12, y, 136, entries[top + row].path);
+        drive_dialog_text(win, 160, y, 242, entries[top + row].volume);
+    }
+    dialog_draw_button(win, 12, 132, 52, 16, "Up");
+    dialog_draw_button(win, 76, 132, 60, 16, "Down");
+    dialog_draw_button(win, 320, 132, 82, 16, "Cancel");
+}
+
+static void show_drive_dialog(void)
+{
+    struct NewWindow nw;
+    struct Window *win;
+    struct DriveEntry *entries;
+    struct IntuiMessage *msg;
+    ULONG bytes;
+    int count;
+    int top = 0;
+    int selected = -1;
+    int running = 1;
+
+    entries = snapshot_mounted_drives(&count, &bytes);
+    if (!entries) {
+        set_status_draw("Cannot read drive list: no memory/list changed");
+        return;
+    }
+    memset(&nw, 0, sizeof(nw));
+    nw.Width = 420;
+    nw.Height = 162;
+    nw.LeftEdge = (WORD)((g_win->WScreen->Width - nw.Width) / 2);
+    nw.TopEdge = (WORD)((g_win->WScreen->Height - nw.Height) / 2);
+    nw.DetailPen = 0;
+    nw.BlockPen = 1;
+    nw.IDCMPFlags = IDCMP_CLOSEWINDOW | IDCMP_MOUSEBUTTONS | IDCMP_REFRESHWINDOW | IDCMP_VANILLAKEY;
+    nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_ACTIVATE | WFLG_SMART_REFRESH;
+    nw.Title = (STRPTR)"Open local drive";
+    nw.Type = WBENCHSCREEN;
+    win = OpenWindow(&nw);
+    if (!win) {
+        FreeMem(entries, bytes);
+        set_status_draw("Cannot open drive selection");
+        return;
+    }
+    draw_drive_dialog(win, entries, count, top);
+    while (running) {
+        Wait((1UL << win->UserPort->mp_SigBit) | (1UL << g_win->UserPort->mp_SigBit));
+        if (!process_operation_events())
+            break;
+        while ((msg = (struct IntuiMessage *)GetMsg(win->UserPort))) {
+            ULONG cls = msg->Class;
+            UWORD code = msg->Code;
+            WORD mx = msg->MouseX;
+            WORD my = msg->MouseY;
+            ReplyMsg((struct Message *)msg);
+            if (cls == IDCMP_CLOSEWINDOW || (cls == IDCMP_VANILLAKEY && code == 27)) {
+                running = 0;
+            } else if (cls == IDCMP_REFRESHWINDOW) {
+                BeginRefresh(win);
+                draw_drive_dialog(win, entries, count, top);
+                EndRefresh(win, TRUE);
+            } else if (cls == IDCMP_MOUSEBUTTONS && code == SELECTUP) {
+                if (in_rect(mx, my, 12, 34, 390, DRIVE_ROWS * DRIVE_ROW_H - 1)) {
+                    int index = top + (my - 34) / DRIVE_ROW_H;
+                    if (index < count) {
+                        selected = index;
+                        running = 0;
+                    }
+                } else if (dialog_button_hit(mx, my, 12, 132, 52, 16)) {
+                    top -= DRIVE_ROWS;
+                    if (top < 0)
+                        top = 0;
+                    draw_drive_dialog(win, entries, count, top);
+                } else if (dialog_button_hit(mx, my, 76, 132, 60, 16)) {
+                    if (top + DRIVE_ROWS < count)
+                        top += DRIVE_ROWS;
+                    draw_drive_dialog(win, entries, count, top);
+                } else if (dialog_button_hit(mx, my, 320, 132, 82, 16)) {
+                    running = 0;
+                }
+            }
+            if (!running)
+                break;
+        }
+    }
+    CloseWindow(win);
+    if (selected >= 0 && !g_cancel_requested) {
+        copy_limited(g_local_path, sizeof(g_local_path), entries[selected].path);
+        init_string_info(&g_path_si);
+        g_active_pane = ACTIVE_PANE_LOCAL;
+        load_local_path();
+    }
+    FreeMem(entries, bytes);
 }
 
 static int confirm_delete_dialog(const char *where, const char *name)
@@ -3518,7 +3922,7 @@ static void address_add_line(char *line)
 static void address_book_load(void)
 {
     BPTR fh;
-    char line[512];
+    char line[1024];
     LONG got;
     int pos = 0;
     g_address_count = 0;
@@ -3556,7 +3960,7 @@ static int address_book_save(void)
         Write(fh, (APTR)header, text_len(header));
     }
     for (i = 0; i < g_address_count; ++i) {
-        char line[512];
+        char line[1024];
         struct AddressEntry *entry = &g_addresses[i];
         line[0] = 0;
         append_text(line, sizeof(line), entry->name);
@@ -4034,6 +4438,10 @@ static int ftp_remote_enter_selected(void)
         ftp_debug_puts("FTP GUI CDUP ok\n");
         remote_path_parent();
     } else {
+        if (!path_can_enter(g_remote_path, remote)) {
+            g_transfer_busy = 0;
+            return 0;
+        }
         ftp_debug_puts("FTP GUI CWD start ");
         ftp_debug_puts(remote);
         ftp_debug_puts("\n");
@@ -4113,6 +4521,8 @@ static int local_enter_selected(void)
             return 0;
         }
     } else {
+        if (!path_can_enter(g_local_path, local))
+            return 0;
         local_path_enter(local);
     }
 
@@ -4133,8 +4543,8 @@ static void handle_button_action(UWORD gid)
             address_book_load();
             address_store_current(g_host);
         }
-    } else if (gid == GID_BTN_LOAD) {
-        load_local_path();
+    } else if (gid == GID_BTN_OPEN) {
+        show_drive_dialog();
     } else if (gid == GID_BTN_UPLOAD) {
         ftp_upload_selected();
     } else if (gid == GID_BTN_DOWNLOAD) {
@@ -4153,6 +4563,7 @@ static int is_button_gadget_id(UWORD gid)
 
 static void handle_mouse_down(WORD mx, WORD my)
 {
+    int old_left = g_remote_left;
     g_pressed_button = BUTTON_NONE;
 
     if (in_rect(mx, my, PASS_FIELD_X, PASS_FIELD_Y, PASS_FIELD_W, PASS_FIELD_H)) {
@@ -4165,6 +4576,37 @@ static void handle_mouse_down(WORD mx, WORD my)
         }
     }
 
+    if (in_rect(mx, my, REMOTE_X, (WORD)(REMOTE_Y + REMOTE_H + 2), REMOTE_W, HSCROLL_H)) {
+        if (mx <= REMOTE_X + HSCROLL_H) {
+            if (g_remote_left > 0)
+                --g_remote_left;
+        } else if (mx >= REMOTE_X + REMOTE_W - HSCROLL_H) {
+            if (g_remote_left < g_remote_left_max)
+                ++g_remote_left;
+        } else {
+            g_scroll_drag = SCROLL_REMOTE_HORIZONTAL;
+            move_remote_horizontal(mx);
+        }
+        if (g_remote_left != old_left)
+            draw_remote_contents(1);
+        return;
+    }
+    if (in_rect(mx, my, LOCAL_X, (WORD)(LOCAL_Y + LOCAL_H + 2), LOCAL_W, HSCROLL_H)) {
+        int old_left = g_local_left;
+        if (mx <= LOCAL_X + HSCROLL_H) {
+            if (g_local_left > 0)
+                --g_local_left;
+        } else if (mx >= LOCAL_X + LOCAL_W - HSCROLL_H) {
+            if (g_local_left < g_local_left_max)
+                ++g_local_left;
+        } else {
+            g_scroll_drag = SCROLL_LOCAL_HORIZONTAL;
+            move_local_horizontal(mx);
+        }
+        if (g_local_left != old_left)
+            draw_local_contents();
+        return;
+    }
     if (list_scrollbar_hit(mx, my, LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H)) {
         g_scroll_drag = SCROLL_LOCAL;
         update_scroll_from_mouse(g_scroll_drag, my);
@@ -4178,15 +4620,29 @@ static void handle_mouse_down(WORD mx, WORD my)
 
 static void handle_mouse_move(WORD mx, WORD my)
 {
-    (void)mx;
-    if (g_scroll_drag != SCROLL_NONE)
+    if (g_scroll_drag == SCROLL_REMOTE_HORIZONTAL) {
+        int old_left = g_remote_left;
+        move_remote_horizontal(mx);
+        if (g_remote_left != old_left)
+            draw_remote_contents(1);
+    } else if (g_scroll_drag == SCROLL_LOCAL_HORIZONTAL) {
+        int old_left = g_local_left;
+        move_local_horizontal(mx);
+        if (g_local_left != old_left)
+            draw_local_contents();
+    } else if (g_scroll_drag != SCROLL_NONE) {
         update_scroll_from_mouse(g_scroll_drag, my);
+    }
 }
 
 static void handle_mouse_up(WORD mx, WORD my)
 {
     int pressed_button = g_pressed_button;
 
+    if (g_scroll_drag != SCROLL_NONE) {
+        g_scroll_drag = SCROLL_NONE;
+        return;
+    }
     if (pressed_button == BUTTON_NONE && in_rect(mx, my, LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H)) {
         int row = (my - LOCAL_Y - 2) / ROW_H;
         int index = g_local_top + row;
@@ -4439,7 +4895,7 @@ int main(int argc, char **argv)
                 gadget_id = ((struct Gadget *)msg->IAddress)->GadgetID;
             ReplyMsg((struct Message *)msg);
             g_cancel_requested = 0;
-            if ((cls == IDCMP_GADGETUP && is_button_gadget_id(gadget_id)) ||
+            if ((cls == IDCMP_GADGETUP && (is_button_gadget_id(gadget_id) || gadget_id == GID_PATH)) ||
                 (cls == IDCMP_MOUSEBUTTONS && code == SELECTUP &&
                  (in_rect(mx, my, LOCAL_X, LOCAL_Y, LOCAL_W, LOCAL_H) ||
                   in_rect(mx, my, REMOTE_X, REMOTE_Y, REMOTE_W, REMOTE_H))))
@@ -4473,11 +4929,28 @@ int main(int argc, char **argv)
                         show_address_book_dialog();
                     else if (item == &g_menu_back)
                         WindowToBack(g_win);
+                    else if (item == &g_menu_timings) {
+                        show_transfer_timings();
+                    } else if (item == &g_menu_block128) {
+                        g_upload_chunk = 128;
+                        set_status_draw("Upload block size: 128 bytes");
+                    } else if (item == &g_menu_block512) {
+                        g_upload_chunk = 512;
+                        set_status_draw("Upload block size: 512 bytes");
+                    } else if (item == &g_menu_block1024) {
+                        g_upload_chunk = 1024;
+                        set_status_draw("Upload block size: 1024 bytes");
+                    } else if (item == &g_menu_block2048) {
+                        g_upload_chunk = 2048;
+                        set_status_draw("Upload block size: 2048 bytes");
+                    }
                     code = next_code;
                 }
             } else if (cls == IDCMP_GADGETUP) {
                 if (is_button_gadget_id(gadget_id))
                     handle_button_action(gadget_id);
+                else if (gadget_id == GID_PATH)
+                    load_local_path();
                 else
                     draw_ui();
             }

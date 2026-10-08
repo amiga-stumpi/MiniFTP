@@ -20,11 +20,13 @@ typedef char *STRPTR;
 #define CONTROL_H 84
 #define STATUS_H 20
 #define MIN_LIST_ROWS 4
+#define HSCROLL_H 12
 #define ROW_H 9
 struct Window { WORD Width, Height, BorderRight, BorderBottom; void *RPort; };
 static struct Window window, *g_win = &window;
 static struct { WORD Width, Height, MinWidth, MinHeight; } g_new_window = {640,200,560,186};
 struct Gadget { WORD LeftEdge, TopEdge, Width, Height; };
+static int g_remote_left;
 static int g_visible_rows, g_local_top, g_local_count, g_remote_top, g_remote_count;
 static int clamp_top(int top, int count) { (void)top; (void)count; return 0; }
 static LONG text_len(const char *s) { return strlen(s); }
@@ -38,6 +40,8 @@ program += '\n'.join('static WORD ' + name + ';' for name in variables)
 program += '\n' + '\n'.join('static struct Gadget ' + name + ';' for name in gadgets)
 program += '\nstatic void update_layout(void)\n' + layout
 program += '\nstatic void draw_text_bounded(' + text
+program += '\nstatic int horizontal_limit(' + source.split('static int horizontal_limit(', 1)[1].split('\nstatic void update_remote_horizontal', 1)[0]
+program += '\nstatic const char *remote_visible_text(' + source.split('static const char *remote_visible_text(', 1)[1].split('\nstatic void draw_remote_horizontal', 1)[0]
 program += r'''
 int main(void) {
     int widths[] = {560, 640, 800, 1000};
@@ -53,13 +57,20 @@ int main(void) {
         window.BorderRight=borders[b]; window.BorderBottom=9;
         update_layout();
         frame_right=window.Width-window.BorderRight-2;
-        assert(BTN_LOAD_X+BTN_LOAD_W <= frame_right-4);
-        assert(REMOTE_X+REMOTE_W == BTN_LOAD_X+BTN_LOAD_W);
+        assert(BTN_OPEN_X+BTN_OPEN_W <= frame_right-4);
+        assert(REMOTE_X+REMOTE_W == BTN_OPEN_X+BTN_OPEN_W);
         assert(STATUS_X+STATUS_W == REMOTE_X+REMOTE_W);
-        assert(g_load_gad.LeftEdge == BTN_LOAD_X && g_load_gad.Width == BTN_LOAD_W);
-        assert(g_path_gad.LeftEdge+g_path_gad.Width+2 < BTN_LOAD_X);
+        assert(g_open_gad.LeftEdge == BTN_OPEN_X && g_open_gad.Width == BTN_OPEN_W);
+        assert(g_path_gad.LeftEdge+g_path_gad.Width+2 < BTN_OPEN_X);
         assert(LOCAL_X+LOCAL_W < REMOTE_X && REMOTE_W >= 120);
         assert(STATUS_Y+17 < window.Height-window.BorderBottom);
+        assert(REMOTE_Y+REMOTE_H+2+HSCROLL_H < STATUS_Y);
+        g_remote_left = 0;
+        assert(remote_visible_text(long_text, 80) == long_text);
+        assert(horizontal_limit(long_text, 80) == 501);
+        g_remote_left = 501;
+        assert(strcmp(remote_visible_text(long_text, 80), long_text+501) == 0);
+        assert(strcmp(remote_visible_text("short", 80), "short") == 0);
         draw_text_bounded(STATUS_X+6, STATUS_TEXT_Y, long_text, STATUS_W-12);
         assert(text_end <= STATUS_X+STATUS_W-6);
         draw_text_bounded(REMOTE_X+4, REMOTE_Y+10, long_text, REMOTE_W-17);
